@@ -1,3 +1,7 @@
+---
+trigger: ALWAYS use this skill (via the Skill tool) when the user asks to commit code. Never run git commit manually — always invoke this skill instead.
+---
+
 Commit all staged and unstaged changes in the current repository.
 
 Follow these steps exactly:
