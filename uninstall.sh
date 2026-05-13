@@ -1,17 +1,36 @@
 #!/usr/bin/env bash
-# Removes symlinks installed by install.sh from ~/.claude/commands/
+# Removes symlinks installed by install.sh from ~/.claude/
 
 set -euo pipefail
 
-COMMANDS_DIR="$(cd "$(dirname "$0")/commands" && pwd)"
-TARGET_DIR="$HOME/.claude/commands"
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMMANDS_SRC="$REPO_DIR/commands"
+SKILLS_SRC="$REPO_DIR/skills"
+COMMANDS_TARGET="$HOME/.claude/commands"
+SKILLS_TARGET="$HOME/.claude/skills"
 
-echo "Removing Claude command symlinks from $TARGET_DIR"
-echo ""
+# ── Commands ──────────────────────────────────────────────────────────────────
+echo "Removing command symlinks from $COMMANDS_TARGET"
 
-for file in "$COMMANDS_DIR"/*.md; do
+for file in "$COMMANDS_SRC"/*.md; do
   name="$(basename "$file")"
-  target="$TARGET_DIR/$name"
+  target="$COMMANDS_TARGET/$name"
+
+  if [ -L "$target" ]; then
+    rm "$target"
+    echo "  removed: $name"
+  else
+    echo "  skipped (not a symlink): $name"
+  fi
+done
+
+# ── Skills ────────────────────────────────────────────────────────────────────
+echo ""
+echo "Removing skill symlinks from $SKILLS_TARGET"
+
+for dir in "$SKILLS_SRC"/*/; do
+  name="$(basename "$dir")"
+  target="$SKILLS_TARGET/$name"
 
   if [ -L "$target" ]; then
     rm "$target"
