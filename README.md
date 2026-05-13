@@ -39,3 +39,6 @@ This means pulling the latest changes (`git pull`) automatically updates your co
 ## Where to put project-specific commands
 
 Commands that are specific to a single repo should live in that repo at `.claude/commands/<name>.md` and be committed there — not here.
+
+## References:
+https://github.com/addyosmani/agent-skills/tree/main
