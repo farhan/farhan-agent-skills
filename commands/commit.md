@@ -6,11 +6,16 @@ Commit all staged and unstaged changes in the current repository.
 
 Follow these steps exactly:
 
-1. Run `git status` to see what files have changed.
-2. Run `git diff HEAD` to review all changes (staged and unstaged).
-3. Run `git log --oneline -5` to match the existing commit message style.
-4. Stage only the relevant changed files (never use `git add -A` or `git add .` blindly — add specific files by name).
-5. Choose the commit type from the Open edX standard below. If the commit mixes types, use the highest-priority type per this order: `revert > feat > fix > perf > docs > test > build > refactor > style > chore > temp`.
+1. **Before doing anything else, ask the user:** "Add Claude as co-author? (y/n)"
+   - Wait for the response before proceeding.
+   - If **y**: include the co-author trailer in the commit message.
+   - If **n**: omit it entirely.
+
+2. Run `git status` to see what files have changed.
+3. Run `git diff HEAD` to review all changes (staged and unstaged).
+4. Run `git log --oneline -5` to match the existing commit message style.
+5. Stage only the relevant changed files (never use `git add -A` or `git add .` blindly — add specific files by name).
+6. Choose the commit type from the Open edX standard below. If the commit mixes types, use the highest-priority type per this order: `revert > feat > fix > perf > docs > test > build > refactor > style > chore > temp`.
 
    | Type | When to use |
    |---|---|
@@ -32,9 +37,6 @@ Follow these steps exactly:
    - `fix!: drop support for the legacy enrollment API`
    - `refactor!: rename CourseKey to CourseLocator throughout public API`
 
-6. **Before committing, ask the user:** "Add Claude as co-author? (y/n — yes/no)"
-   - If **y**: include the co-author trailer in the commit message.
-   - If **n**: omit it entirely.
 7. Write a concise commit message that focuses on the *why*, not the *what*. Format (with co-author):
    ```
    git commit -m "$(cat <<'EOF'
