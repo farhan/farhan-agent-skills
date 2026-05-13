@@ -58,9 +58,8 @@ Follow these steps exactly:
    )"
    ```
 8. After committing, run `git status` to confirm success.
-9. **Never push** — the user pushes manually.
 
-At the very end of your response, output a summary section like this:
+After confirming success, output the summary section:
 
 ---
 **Commit Summary**
@@ -70,3 +69,9 @@ At the very end of your response, output a summary section like this:
 - Commit message(s):
   1. `<hash>` — <commit message>
   (add more lines if multiple commits were made)
+
+---
+
+9. After showing the summary, ask: "Push to remote? (y/n)"
+   - If **y**: run `git push` and report the result.
+   - If **n**: do nothing.
