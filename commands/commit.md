@@ -28,9 +28,9 @@ Follow these steps exactly:
    - `fix!: drop support for the legacy enrollment API`
    - `refactor!: rename CourseKey to CourseLocator throughout public API`
 
-6. **Before committing, ask the user:** "Do you want to add Claude as a co-author in the commit message? (yes/no)"
-   - If **yes**: include the co-author trailer in the commit message.
-   - If **no**: omit it entirely.
+6. **Before committing, ask the user:** "Add Claude as co-author? (y/n — yes/no)"
+   - If **y**: include the co-author trailer in the commit message.
+   - If **n**: omit it entirely.
 7. Write a concise commit message that focuses on the *why*, not the *what*. Format (with co-author):
    ```
    git commit -m "$(cat <<'EOF'
