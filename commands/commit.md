@@ -37,7 +37,7 @@ Follow these steps exactly:
    - `fix!: drop support for the legacy enrollment API`
    - `refactor!: rename CourseKey to CourseLocator throughout public API`
 
-7. Write a concise commit message that focuses on the *why*, not the *what*. Format (with co-author):
+7. Write a concise commit message that focuses on the *why*, not the *what*. The first line (`<type>: <short summary>`) MUST be 70 characters or fewer. Format (with co-author):
    ```
    git commit -m "$(cat <<'EOF'
    <type>: <short summary>
