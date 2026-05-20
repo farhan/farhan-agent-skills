@@ -17,8 +17,11 @@ Areas to focus:
 - Typos in strings, comments, or identifiers
 - Correctness issues (wrong flags, invalid config values, broken syntax)
 - Security or best-practice concerns
+- Implementation is backward compatible
 
 Report findings grouped by file. For each issue include the line number/context and a brief explanation of the problem. If no issues are found, say so clearly.
 
-At the end
+At end share bulleted concise summary
+
+At the end of everything
 Run `git add .`
