@@ -1,22 +1,140 @@
 ---
-name: fill-erp-log
-description: Generate Arbisoft ERP project log text for a given week by aggregating GitHub activity (openedx org only, with detailed PR info), Google Calendar meetings, Slack #aximprovements activity, Chrome browsing history, and GitHub project board events. Writes a formatted text file to /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/. Use when the user asks to "fill ERP log", "generate weekly log", "make my project log", "provide me the log", or similar. Read-only — no ERP submission.
-version: 2.1.0
+name: erp-log
+description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with accumulated daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
+version: 3.0.0
 model: haiku
-allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Write, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
+allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
 
-# fill-erp-log
+# erp-log
 
-Generate a weekly Arbisoft ERP project log from GitHub, Google Calendar, Slack, Chrome browsing history, and GitHub project board activity, then write it to a text file.
+Generate a weekly Arbisoft ERP project log, or append a quick daily entry to the ongoing log.
 
-## Step 1: Determine Target Week and ERP Log ID
+---
 
-**ERP URL (required for submission):** If the user provides a URL like `https://erp.arbisoft.com/project-logs/update/382332/`, extract the log ID from it immediately:
+## Step 0: Parse Arguments and Route
+
+**Syntax:**
+```
+/erp-log [d|daily|w|weekly] [ERP_URL] [--week YYYY-MM-DD] [free-form content]
+```
+
+Parse the first argument (case-insensitive):
+- `w` or `weekly` → **Weekly Mode** — go to [Weekly Mode](#weekly-mode) section below
+- `d` or `daily`, or **no mode argument given** → **Daily Mode** — go to [Daily Mode](#daily-mode) section below
+
+**Directory naming (used in both modes):**
+
+All files for a week live under:
+```
+/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/
+```
+
+Where `WEEK_DIR` uses format `Mon, Jun 01 to Sun, Jun 07`:
+- `WEEK_START` = Monday of the target week
+- `WEEK_END_SUN` = WEEK_START + 6 days (Sunday)
+- `WEEK_END_FRI` = WEEK_START + 4 days (Friday)
+- `WEEK_DIR` = `Mon, {MMM DD} to Sun, {MMM DD}` — e.g. `Mon, Jun 01 to Sun, Jun 07`
+  - Use zero-padded day (`01`, `07`, `25`)
+  - Month abbreviation: Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec
+
+Files per directory:
+- `erp_log.txt` — accumulated daily entries, refined to final log on weekly run
+- `devtools_fill_log.js` — ready-to-paste DevTools submission script
+
+---
+
+## DAILY MODE
+
+### Step D1: Determine Target Date and Week
+
+Parse the user's message for a date reference:
+- "yesterday" → yesterday's PKT date
+- "on Monday", "last Tuesday" → resolve to the most recent such weekday
+- "Jun 1", "June 1st", "2026-05-30" → parse as an absolute date
+- No date mentioned → today's PKT date (UTC+5)
+
+Compute:
+- `TARGET_DATE` = resolved date (YYYY-MM-DD)
+- `WEEK_START` = Monday of the week containing TARGET_DATE
+- `WEEK_END_SUN` = WEEK_START + 6 days
+- `WEEK_END_FRI` = WEEK_START + 4 days
+- `WEEK_DIR` = formatted directory name (see Step 0)
+- `LOG_DIR` = `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>`
+- `LOG_FILE` = `<LOG_DIR>/erp_log.txt`
+
+### Step D2: Parse the Task Content
+
+From the user's message (the text after `d`/`daily` and any date reference), extract:
+
+- **Description:** what was worked on — preserve the user's own wording where possible
+- **Hours:** time spent — look for patterns like `2.5h`, `2 hours`, `~1.5`, `30 min`, `half an hour`
+- **Tag:** infer from the description:
+
+| Signal in description | Tag |
+|---|---|
+| PR, commit, coding, implemented, built, wrote code | `[Coding]` |
+| reviewed, code review, PR review | `[Code Review]` |
+| meeting, sync, standup, call, huddle | `[Meeting]` |
+| research, investigated, explored, R&D | `[R&D]` |
+| tested, QA, testing | `[Testing]` |
+| watched, read docs, learning, tutorial | `[Training/Learning]` |
+| deployed, deployment | `[Deployment]` |
+| wrote docs, documentation | `[Documentation]` |
+| debugged, debugging, fixed a bug | `[Debugging]` |
+
+If **hours are not mentioned**, ask: "How long did this take? (e.g. 1.5h)" — do not proceed until hours are known.
+
+If the user describes **multiple tasks** in one message, create one entry per task.
+
+### Step D3: Write to Log File
+
+Create the directory if it doesn't exist:
+```bash
+mkdir -p "<LOG_DIR>"
+```
+
+If `erp_log.txt` does not exist yet, create it with this header:
+```
+Week: WEEK_START .. WEEK_END_FRI
+--- Accumulated daily entries ---
+```
+
+Append each entry as one line:
+```
+TARGET_DATE [TAG] - Description (hours)
+```
+
+Example:
+```
+2026-06-02 [Coding] - Worked on following PR: https://github.com/openedx/repo/pull/123 (2.5)
+2026-06-02 [Meeting] - Axim Daily Syncup (0.5)
+```
+
+Hours format: bare decimal, no `h` suffix (`0.5`, `2.5`).
+
+### Step D4: Confirm to User
+
+Show what was added:
+> "Added to `logs/<WEEK_DIR>/erp_log.txt`:"
+> `2026-06-02 [Coding] - Worked on following PR: ... (2.5)`
+
+List all entries if multiple were added.
+
+---
+
+## WEEKLY MODE
+
+### Step 1: Determine Target Week and ERP Log ID
+
+**ERP URL (required):** If the user provides a URL like `https://erp.arbisoft.com/project-logs/update/382332/`, extract the log ID from it immediately:
 ```
 LOG_ID = last path segment of the URL (e.g. "382332")
 ```
-Store it — it will be used in Step 13 to generate the DevTools script. If the user did not provide the URL, generate the log file anyway and note that the URL is needed before generating the JS script.
+**If the user did NOT provide the ERP URL**, ask for it before proceeding:
+> "Please share the ERP log URL (e.g. `https://erp.arbisoft.com/project-logs/update/382332/`) so I can fetch existing entries and generate the DevTools script."
+
+Wait for the URL before continuing. Do not proceed without a LOG_ID.
 
 **Week:** If the user specified `--week YYYY-MM-DD`, a date like "May 22", or "last week", parse that into the Monday of the target week. Otherwise compute the current Monday in PKT (UTC+5):
 ```bash
@@ -26,12 +144,78 @@ If today IS Monday, use today.
 
 Store:
 - `WEEK_START` = Monday YYYY-MM-DD
-- `WEEK_END` = Friday YYYY-MM-DD
+- `WEEK_END_FRI` = Friday YYYY-MM-DD
+- `WEEK_END_SUN` = Sunday YYYY-MM-DD
 - `GH_RANGE` = `YYYY-MM-DD..YYYY-MM-DD` (Mon..Fri, used in GitHub queries)
+- `WEEK_DIR` = `Mon, {MMM DD} to Sun, {MMM DD}` (e.g. `Mon, Jun 01 to Sun, Jun 07`)
+- `LOG_DIR` = `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>`
 
 ---
 
-## Step 2: Verify GitHub Auth
+### Step 2: Fetch Existing ERP Log Entries (ALWAYS — before any other work)
+
+**This step is mandatory every time, even if the log looks empty.**
+
+The ERP log may already have entries logged by the user. Always fetch them first so they are preserved and not overwritten.
+
+Share the following snippet with the user and ask them to paste the output:
+
+> "Before I start, please paste this into your Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/` and share the output:"
+>
+> ```javascript
+> fetch('/api/v1/project-logs/person/get/<LOG_ID>/', {headers:{Accept:'application/json'},credentials:'include'}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d)))
+> ```
+
+Wait for the user to paste the JSON response before proceeding.
+
+**Once you receive the JSON, parse the existing entries:**
+
+For each project in `response.projects`, for each task in `project.tasks`, for each day in `task.days`:
+- Extract: `date`, `decimal_hours`, `label_option.value` (labelId), `label_option.label` (taskType), `task.description`
+- If `label_option` is null, infer labelId from the description (e.g. "sync" / "meeting" / "standup" → 37 Meeting; "PR" / "worked on" → 34 Coding; "reviewed" → 35 Code Review; "R&D" / "explored" → 44 R&D)
+
+Display a clear summary of what is already logged:
+
+```
+Already logged in ERP for week of <WEEK_START>:
+  Mon 2026-06-01: [Meeting] Axim Sync up + Knowledge Sharing (0.75h)
+  ...
+  Total already logged: X.Xh
+```
+
+Store these as `ERP_ENTRIES` — they will be preserved verbatim in Step 16.
+
+**Deduplication note:** When generating new entries in Steps 3–11, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Step 2.5) as already-present. Do not create a new entry for something already logged.
+
+---
+
+### Step 2.5: Read Accumulated Daily Entries
+
+Check if `<LOG_DIR>/erp_log.txt` exists:
+```bash
+ls "<LOG_DIR>/erp_log.txt" 2>/dev/null
+```
+
+If it exists, read it and parse all lines matching the format:
+```
+YYYY-MM-DD [TAG] - Description (hours)
+```
+
+Display a summary:
+```
+Accumulated daily entries from log file:
+  2026-06-01 [Coding] - Worked on PR #123 (2.5)
+  2026-06-02 [Meeting] - Axim Daily Syncup (0.5)
+  Total accumulated: X.Xh
+```
+
+Store these as `ACCUMULATED_ENTRIES`.
+
+**Deduplication with ERP_ENTRIES:** If an accumulated entry matches an ERP entry (same date + same or similar description), mark it as covered — do not include it again in the final output.
+
+---
+
+### Step 3: Verify GitHub Auth
 
 GitHub username is **`farhan`** (hardcoded — do not resolve dynamically).
 
@@ -45,9 +229,9 @@ Set `GH_USER=farhan`.
 
 ---
 
-## Step 3: Fetch GitHub Activity (openedx org only)
+### Step 4: Fetch GitHub Activity (openedx org only)
 
-Run all three queries. The GitHub search API uses UTC dates; since the user is PKT (UTC+5), extend the range by ±1 day to avoid missing boundary items — query `(WEEK_START-1day)..(WEEK_END+1day)` and then filter to PKT weekdays during classification.
+Run all three queries. The GitHub search API uses UTC dates; since the user is PKT (UTC+5), extend the range by ±1 day to avoid missing boundary items — query `(WEEK_START-1day)..(WEEK_END_FRI+1day)` and then filter to PKT weekdays during classification.
 
 **Authored PRs** (updated this week — catches merges of older PRs):
 ```bash
@@ -132,7 +316,7 @@ gh api "repos/{owner}/{repo}/pulls/{number}" \
 
 ---
 
-## Step 4: Fetch GitHub Project Board Events
+### Step 5: Fetch GitHub Project Board Events
 
 Project board URL: `https://github.com/orgs/openedx/projects/55/views/1`
 
@@ -187,8 +371,8 @@ query {
 ```
 
 Filter the results:
-- Keep only items where `content.updatedAt` falls within `WEEK_START..WEEK_END+1day`
-- Keep only items assigned to `farhan` OR items where the user's authored/reviewed PRs from Step 3 are linked
+- Keep only items where `content.updatedAt` falls within `WEEK_START..WEEK_END_FRI+1day`
+- Keep only items assigned to `farhan` OR items where the user's authored/reviewed PRs from Step 4 are linked
 - Note the Status field value (e.g. "In Progress", "In Review", "Done") — use it to corroborate what the user was working on
 
 Use board items to:
@@ -198,7 +382,7 @@ Use board items to:
 
 ---
 
-## Step 5: Fetch Google Calendar Events
+### Step 6: Fetch Google Calendar Events
 
 **Primary calendar ID (hardcoded):** `farhan.khan@arbisoft.com`
 
@@ -207,7 +391,7 @@ Fetch events:
 mcp__claude_ai_Google_Calendar__list_events
   calendarId: farhan.khan@arbisoft.com
   startTime: WEEK_START T00:00:00+05:00
-  endTime:   WEEK_END   T23:59:59+05:00
+  endTime:   WEEK_END_FRI T23:59:59+05:00
   pageSize:  50
 ```
 
@@ -229,7 +413,7 @@ Extract duration from event start/end times (round to nearest 0.25h). Calendar d
 
 ---
 
-## Step 6: Fetch Slack Activity from #axim-aximprovements-internal
+### Step 7: Fetch Slack Activity from #axim-aximprovements-internal
 
 **Known values (hardcoded — skip search if unchanged):**
 - Channel ID: `C05NRP1U0CC` (#axim-aximprovements-internal)
@@ -240,7 +424,7 @@ If the channel search ever fails, search `mcp__claude_ai_Slack__slack_search_cha
 **Search user's messages for the week:**
 Use `mcp__claude_ai_Slack__slack_search_public_and_private` with:
 ```
-query: "from:<@UGZM9UKPH> after:<WEEK_START> before:<WEEK_END+1day>"
+query: "from:<@UGZM9UKPH> after:<WEEK_START> before:<WEEK_END_FRI+1day>"
 ```
 Use text date strings (`after:2026-05-25`) — NOT Unix timestamps — for the search query.
 
@@ -274,7 +458,7 @@ mcp__claude_ai_Slack__slack_search_public_and_private
   channel_types: "public_channel,private_channel,mpim,im"
 ```
 
-**IMPORTANT — do NOT use `after:`/`before:` date filters on huddle searches.** Slack's date filter silently drops results even when matching messages exist (confirmed: a May 18 huddle was invisible in date-filtered search but appeared in unfiltered search). Instead, run **without date filters** and manually filter results by checking the `Time:` field in each result — keep only messages whose PKT timestamp falls within `WEEK_START..WEEK_END`.
+**IMPORTANT — do NOT use `after:`/`before:` date filters on huddle searches.** Slack's date filter silently drops results even when matching messages exist (confirmed: a May 18 huddle was invisible in date-filtered search but appeared in unfiltered search). Instead, run **without date filters** and manually filter results by checking the `Time:` field in each result — keep only messages whose PKT timestamp falls within `WEEK_START..WEEK_END_FRI`.
 
 For each huddle signal found:
 - Note the other participant(s) and the approximate time from message timestamp
@@ -294,7 +478,7 @@ From Slack, extract:
 
 ---
 
-## Step 7: Fetch Chrome Browsing History
+### Step 8: Fetch Chrome Browsing History
 
 Chrome history DB is at:
 ```
@@ -313,7 +497,7 @@ SELECT url, title,
   datetime(last_visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') as visited_pkt
 FROM urls
 WHERE visited_pkt >= '<WEEK_START> 00:00:00'
-  AND visited_pkt <= '<WEEK_END> 23:59:59'
+  AND visited_pkt <= '<WEEK_END_FRI> 23:59:59'
   AND (
     url LIKE '%github.com/openedx%'
     OR url LIKE '%github.com/orgs/openedx%'
@@ -345,7 +529,7 @@ rm /tmp/chrome_history_tmp.db
 
 ---
 
-## Step 8: Mine Conversation History
+### Step 9: Mine Conversation History
 
 Re-read the current conversation for any activity the user mentioned during the target week:
 - PR links or issue links not captured by GitHub search
@@ -357,7 +541,7 @@ Add these as supplementary entries. These are authoritative — prefer them over
 
 ---
 
-## Step 9: Classify Each Item
+### Step 10: Classify Each Item
 
 Apply these rules in order:
 
@@ -384,6 +568,7 @@ Apply these rules in order:
 - If a Calendar event matches a Slack standup/meeting → use Calendar, discard Slack duplicate
 - If Chrome history confirms a PR was visited on a specific day → use that for day assignment, do NOT create a new entry
 - GitHub project board items already covered by an authored PR → skip the board item as a separate entry; use it only to enrich the PR description
+- Anything already present in `ERP_ENTRIES` or `ACCUMULATED_ENTRIES` → do NOT create a duplicate new entry
 
 **Bot/automated PR filtering:**
 - PRs titled "chore: Upgrade Python/JS requirements", "build(deps): bump ...", or "chore: pin GitHub Actions workflows to full commit SHAs" are bot-generated.
@@ -401,7 +586,7 @@ Apply these rules in order:
 
 ---
 
-## Step 10: Estimate Hours Per Item
+### Step 11: Estimate Hours Per Item
 
 | Item type | Hours |
 |---|---|
@@ -424,30 +609,33 @@ Apply these rules in order:
 | Huddle / quick call (no calendar event, longer thread or code walkthrough) | 0.5h |
 | Training/Learning item | 0.5h (or as mentioned by user) |
 
-Round all hours to the nearest 0.1h. If the user explicitly stated hours anywhere (in the conversation or in a Slack message), use those instead.
+Round all hours to the nearest 0.1h. If the user explicitly stated hours anywhere (in the conversation, in an `ACCUMULATED_ENTRIES` line, or in a Slack message), use those instead.
+
+For items already in `ERP_ENTRIES`, use the hours already recorded there — do not re-estimate.
+For items already in `ACCUMULATED_ENTRIES`, use the hours from those entries — do not re-estimate.
 
 ---
 
-## Step 11: Balance Daily Hours
+### Step 12: Balance Daily Hours
 
 Target: **~8h/day**, max 9.0h, min 6.5h.
 
-1. Sum hours per PKT weekday.
-2. If a day exceeds 9.0h: move the lowest-priority `[Coding]` or `[R&D]` entry to the lightest adjacent weekday (keep `[Meeting]` and `[Code Review]` in place).
+1. Sum hours per PKT weekday — include `ERP_ENTRIES`, `ACCUMULATED_ENTRIES`, and new entries.
+2. If a day exceeds 9.0h: move the lowest-priority `[Coding]` or `[R&D]` entry to the lightest adjacent weekday (keep `[Meeting]` and `[Code Review]` in place). Do NOT move ERP or accumulated entries.
 3. If a day is below 6.5h and there are unassigned GitHub issues or Slack R&D threads, redistribute them here.
-4. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every weekday where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event already covers it.
+4. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every weekday where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event or existing entry already covers it.
 5. If a weekday has zero signal across all sources, leave it **blank** in the output and add a note: `(no activity detected — leave or holiday?)`.
 
 ---
 
-## Step 12: Render the Output
+### Step 13: Render the Output
 
 Format the log exactly as:
 
 ```
 Week: YYYY-MM-DD .. YYYY-MM-DD
-Sources: GitHub (openedx) | Google Calendar | Slack (#aximprovements) | Chrome history | GitHub board (openedx/projects/55) | Conversation history
-GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Slack: M messages  |  Board: K items
+Sources: GitHub (openedx) | Google Calendar | Slack (#aximprovements) | Chrome history | GitHub board (openedx/projects/55) | Accumulated daily entries | Conversation history
+GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Slack: M messages  |  Board: K items  |  Daily entries: D accumulated
 
 --- YYYY-MM-DD (Mon) | X.Xh ---
 [Tag] - Description (X.X)
@@ -469,22 +657,34 @@ GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Slack: M mes
 Weekly total: XX.Xh
 ```
 
+Entry ordering within each day:
+1. `ERP_ENTRIES` (already in ERP — listed first)
+2. `ACCUMULATED_ENTRIES` for that date (daily mode entries)
+3. New entries generated from connectors this session
+
 ---
 
-## Step 13: Write the Log File
+### Step 14: Write the Log File
+
+Create the directory if it doesn't exist:
+```bash
+mkdir -p "<LOG_DIR>"
+```
 
 Write the rendered output to:
 ```
-/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/erp_log_<WEEK_START>.txt
+<LOG_DIR>/erp_log.txt
 ```
 
-**IMPORTANT — hours format:** Use `(0.5)` not `(0.5h)`. The `submit_log.py` parser regex requires bare numbers — an `h` suffix breaks parsing and produces "no entries parsed" error.
+i.e. `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/erp_log.txt`
+
+**IMPORTANT — hours format:** Use `(0.5)` not `(0.5h)` — bare decimal numbers only, no unit suffix.
 
 Use the Write tool. Confirm the file path to the user after writing.
 
 ---
 
-## Step 14: Ask for Adjustments
+### Step 15: Ask for Adjustments
 
 After writing the file, show the full content in chat and ask:
 > "Adjust anything? (e.g., 'move PR #35 to Tuesday', 'add 1h learning on Thursday', 'the grooming was on Wednesday', 'I was on leave Friday')"
@@ -493,15 +693,26 @@ If the user requests changes, apply them, rewrite the file, and confirm.
 
 ---
 
-## Step 15: Generate DevTools Submission Script
+### Step 16: Generate DevTools Submission Script
 
-After the log file is finalised, **always** write the script to the fixed path (no date suffix — overwrite each time):
+After the log file is finalised, **always** write the script to:
 ```
-/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/devtools_fill_log.js
+<LOG_DIR>/devtools_fill_log.js
 ```
-Never name it `devtools_fill_log_YYYY-MM-DD.js` or any variant — always the same filename.
+
+i.e. `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/devtools_fill_log.js`
+
+Never add a date suffix — one file per week directory, overwrite each time.
 
 **Why a file, not chat code:** Copying JS from chat causes smart-quote mangling (`'` → `'`) which breaks JavaScript parsing. Always write to disk — user copies from the file in their editor.
+
+**CRITICAL — ENTRIES must include all three sources:**
+The PATCH request replaces all tasks for the project. Therefore the ENTRIES array must contain:
+1. All entries from `ERP_ENTRIES` (Step 2) — converted to ENTRIES format, preserving their original date, labelId, hours, and description exactly
+2. All entries from `ACCUMULATED_ENTRIES` (Step 2.5) — that are NOT already covered by ERP_ENTRIES
+3. All new entries generated in this session — only those NOT already covered by ERP_ENTRIES or ACCUMULATED_ENTRIES
+
+For existing entries where `label_option` was null, infer the labelId from the description as described in Step 2.
 
 **Rules for the JS:**
 - Use `var` and regular `function` (no arrow functions on critical lines) — maximises compatibility
@@ -511,8 +722,7 @@ Never name it `devtools_fill_log_YYYY-MM-DD.js` or any variant — always the sa
 - Hours format: decimal number (e.g. `0.5`, `1.5`, `6.5`)
 - `desc` max 120 chars — truncate PR URL lists if needed
 - Log ID comes from the ERP portal URL: `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`
-
-**Auth note:** `setup_auth.py` is blocked by Google Workspace policy (org blocks the Playwright OAuth app). The DevTools approach uses the browser's existing logged-in session via `document.cookie` — no separate SSO needed.
+- The DevTools approach uses the browser's existing logged-in session via `document.cookie` — no separate auth needed
 
 **Template:**
 
@@ -521,9 +731,15 @@ Never name it `devtools_fill_log_YYYY-MM-DD.js` or any variant — always the sa
   var LOG_ID = "<LOG_ID>";
   var BASE = "https://erp.arbisoft.com";
 
+  // ENTRIES = ERP entries (preserved) + accumulated daily entries + new entries this session
+  // ERP entries are listed first within each day, then accumulated, then new
   var ENTRIES = [
-    { date: "YYYY-MM-DD", labelId: 37, taskType: "Meeting",     hours: 0.5, desc: "Axim Daily Syncup" },
-    // ... one object per log entry
+    // --- From ERP (preserved verbatim) ---
+    { date: "YYYY-MM-DD", labelId: 37, taskType: "Meeting",     hours: 0.75, desc: "Axim Sync up + Knowledge Sharing" },
+    // --- From accumulated daily entries ---
+    { date: "YYYY-MM-DD", labelId: 34, taskType: "Coding",      hours: 2.5,  desc: "Worked on following PR: https://..." },
+    // --- New entries added this session ---
+    { date: "YYYY-MM-DD", labelId: 35, taskType: "Code Review", hours: 1.5,  desc: "Reviewed following PR: https://..." },
   ];
 
   var csrf = document.cookie.split("; ").find(function(r) { return r.startsWith("csrftoken="); });
@@ -592,18 +808,23 @@ Never name it `devtools_fill_log_YYYY-MM-DD.js` or any variant — always the sa
 ```
 
 Tell the user:
-> "Script written to `devtools_fill_log.js`. Open it in VS Code, Cmd+A → Cmd+C, then paste into Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`. This saves a draft — refresh the page to review, then submit manually."
+> "Script written to `logs/<WEEK_DIR>/devtools_fill_log.js`. Open it in VS Code, Cmd+A → Cmd+C, then paste into Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`. This saves a draft — refresh the page to review, then submit manually."
 
 ---
 
 ## Invocation Examples
 
 ```
-/fill-erp-log https://erp.arbisoft.com/project-logs/update/382332/
-/fill-erp-log for May 22 https://erp.arbisoft.com/project-logs/update/382332/
-/fill-erp-log --week 2026-05-04 https://erp.arbisoft.com/project-logs/update/382332/
-/fill-erp-log last week
-/fill-erp-log for May 12
+/erp-log w https://erp.arbisoft.com/project-logs/update/382332/
+/erp-log weekly for May 22 https://erp.arbisoft.com/project-logs/update/382332/
+/erp-log w --week 2026-05-04 https://erp.arbisoft.com/project-logs/update/382332/
+/erp-log w last week
+/erp-log w for May 12
+
+/erp-log d Worked on the auth PR, about 2.5 hours
+/erp-log d yesterday: attended team grooming session, 1 hour
+/erp-log d Reviewed John's PR on the frontend, 1.5h. Also daily standup 0.5h
+/erp-log d on Monday: investigated issue #234, 2h
 ```
 
-The ERP URL is optional for log generation but required for the DevTools JS script (Step 15). Always extract the LOG_ID from it when provided.
+The ERP URL is optional for log generation but required for the DevTools JS script (Step 16). Always extract the LOG_ID from it when provided.
