@@ -1,7 +1,7 @@
 ---
 name: erp-log
 description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with accumulated daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
-version: 3.0.0
+version: 3.1.0
 model: haiku
 allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
@@ -29,8 +29,6 @@ All of the following must be available before running weekly mode. Check each be
 | **Claude Code artifacts (local)** | Coding session transcripts | `~/.claude/projects/` — always available if Claude Code is installed |
 
 If a connector is unavailable, skip its step and note it in the Sources header of the final log.
-
----
 
 ---
 
@@ -507,7 +505,7 @@ Use board items to:
 
 Scan Claude Code's local conversation transcripts and artifact files created during the target week. These capture work done inside coding sessions (debugging, R&D, code writing) that may not appear in GitHub activity or Calendar, making the final log more insightful.
 
-**7a — Create date boundary markers and find JSONL conversation logs:**
+**8a — Create date boundary markers and find JSONL conversation logs:**
 ```bash
 touch -t $(date -j -f "%Y-%m-%d" "${WEEK_START}" +%Y%m%d0000 2>/dev/null || date -d "${WEEK_START}" +%Y%m%d0000) /tmp/erp_week_start 2>/dev/null
 touch -t $(date -j -f "%Y-%m-%d" "${WEEK_END_FRI}" +%Y%m%d2359 2>/dev/null || date -d "${WEEK_END_FRI}" +%Y%m%d2359) /tmp/erp_week_end 2>/dev/null
@@ -515,12 +513,12 @@ touch -t $(date -j -f "%Y-%m-%d" "${WEEK_END_FRI}" +%Y%m%d2359 2>/dev/null || da
 find ~/.claude/projects -type f -name "*.jsonl" -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
 ```
 
-**7b — Also scan the project logs directory for any files created this week:**
+**8b — Also scan the project logs directory for any files created this week:**
 ```bash
 find /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs -type f -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
 ```
 
-**7c — For each JSONL file found, extract work-relevant content:**
+**8c — For each JSONL file found, extract work-relevant content:**
 ```bash
 cat <filepath> | python3 -c "
 import sys, json
@@ -547,7 +545,7 @@ for line in sys.stdin:
 - Time estimates or durations mentioned explicitly
 - Learning resources discussed (videos, docs, articles)
 
-**Store as `ARTIFACT_ENTRIES`** — summarized work items with dates inferred from file modification timestamps or message content. Use alongside other sources in Step 14 (synthesis). If the same PR/issue also appears in GitHub results, do NOT create a duplicate — use the artifact context only to enrich the description.
+**Store as `ARTIFACT_ENTRIES`** — summarized work items with dates inferred from file modification timestamps or message content. Use alongside other sources in Step 15 (synthesis). If the same PR/issue also appears in GitHub results, do NOT create a duplicate — use the artifact context only to enrich the description.
 
 Clean up:
 ```bash
@@ -634,9 +632,15 @@ When invoked for a specific `TARGET_DAY` (e.g. "2026-06-03"):
 4. **Do NOT create entries for Gmail, GitHub (already fetched via MCP), or ERP** — those are covered by other steps
 
 **Query for a single day** (Chrome stores timestamps as microseconds since 1601-01-01; active profile is `Profile 1`):
-```bash
-cp ~/Library/Application\ Support/Google/Chrome/Profile\ 1/History /tmp/chrome_history_tmp.db
 
+Copy the History DB to a temp location (Chrome locks the live file):
+```bash
+cp ~/Library/Application\ Support/Google/Chrome/Profile\ 1/History \
+  /tmp/chrome_history_tmp.db
+```
+
+Run the query against the temp DB:
+```bash
 sqlite3 /tmp/chrome_history_tmp.db "
 SELECT
   time(v.visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') as time_pkt,
@@ -675,9 +679,12 @@ WHERE date(v.visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') = '<TARG
   )
 ORDER BY v.visit_time ASC;
 "
+```
 
+Clean up the temp DB:
+```bash
 rm /tmp/chrome_history_tmp.db
-"
+```
 
 From results, create `[Training/Learning]` entries for video/course/reading activity with duration from `mins`. Group consecutive visits to the same site into one entry. Ignore anything < 5 min.
 
@@ -1063,6 +1070,60 @@ Tell the user:
 
 ---
 
+### Step 19: Print Weekly Summary
+
+After the log file and DevTools script have been written, print a concise weekly summary in the **chat** (not DevTools console). Compute tallies from the finalized ENTRIES array (all sources combined: `ERP_ENTRIES` + `ACCUMULATED_ENTRIES` + new entries from this session).
+
+**Bucketing rules for "By label":**
+- `Coding` (labelId 34)
+- `Meeting` (labelId 37) — includes huddles, standups, syncs, grooming
+- `Code Review` (labelId 35)
+- `R&D` (labelId 44)
+- `Training/Learning`
+- `Debugging` (labelId 40)
+- `Other` — any label not listed above (e.g. Testing 39, Documentation 42, Deployment 60, Backlog grooming, etc.)
+
+Each percentage is `round(label_hours / total_hours × 100)`. Show buckets with `> 0h` only (skip lines that would be `0.0h (0%)`).
+
+**Top 3 activities:** the three highest-`hours` individual entries from ENTRIES. Truncate description to ~60 chars; show the PKT weekday short name (Mon/Tue/Wed/Thu/Fri).
+
+**Delta computation:** `Δ = total - 40`. If positive, render as `+X.Xh`; if negative, `-X.Xh`.
+
+**Format (print exactly as below, with the box-drawing lines):**
+
+```
+══════════════════════════════════════════════
+  WEEKLY SUMMARY — Mon MMM DD to Fri MMM DD
+══════════════════════════════════════════════
+Total: XX.Xh  (target 40h, Δ = ±X.Xh)
+
+By label:
+  Coding           XX.Xh  (XX%)
+  Meeting          XX.Xh  (XX%)
+  Code Review      XX.Xh  (XX%)
+  R&D              XX.Xh  (XX%)
+  Training/Learning XX.Xh  (XX%)
+  Debugging        XX.Xh  (XX%)
+  Other            XX.Xh  (XX%)
+
+By day:
+  Mon XX/XX   X.Xh
+  Tue XX/XX   X.Xh
+  Wed XX/XX   X.Xh
+  Thu XX/XX   X.Xh
+  Fri XX/XX   X.Xh
+
+Top 3 activities:
+  1. [Tag] Description — X.Xh (Day)
+  2. [Tag] Description — X.Xh (Day)
+  3. [Tag] Description — X.Xh (Day)
+══════════════════════════════════════════════
+```
+
+Keep this summary short — it is a quick health-check for the user before they submit via DevTools.
+
+---
+
 ## Invocation Examples
 
 ```
@@ -1079,3 +1140,5 @@ Tell the user:
 ```
 
 The ERP URL is optional for log generation but required for the DevTools JS script (Step 18). Always extract the LOG_ID from it when provided.
+
+After Step 18 writes the DevTools script, Step 19 prints a concise weekly summary in the chat (total hours, breakdown by label, breakdown by day, and top 3 activities) so the user can sanity-check the log before pasting the DevTools script.
