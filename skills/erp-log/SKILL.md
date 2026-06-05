@@ -25,6 +25,7 @@ All of the following must be available before running weekly mode. Check each be
 | **Gmail MCP** | Sent emails — communication effort and work context | Connected in Claude.ai → Integrations → Gmail |
 | **Slack MCP** | Channel messages, DMs, huddles | Connected in Claude.ai → Integrations → Slack |
 | **Chrome history (local)** | Learning/video/docs sessions (on-demand only) | `~/Library/Application Support/Google/Chrome/Profile 1/History` must exist |
+| **Cursor IDE history (local)** | Coding sessions not yet in GitHub PRs (on-demand only) | `~/Library/Application Support/Cursor/User/History/` must exist |
 | **Claude Code artifacts (local)** | Coding session transcripts | `~/.claude/projects/` — always available if Claude Code is installed |
 
 If a connector is unavailable, skip its step and note it in the Sources header of the final log.
@@ -622,7 +623,7 @@ From Slack, extract:
 
 ### Step 10: Fetch Chrome Browsing History *(On-Demand Only — Do NOT run by default)*
 
-**Skip this step during normal routine.** Chrome history is only queried after Step 13 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 13.
+**Skip this step during normal routine.** Chrome history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
 
 When invoked for a specific `TARGET_DAY` (e.g. "2026-06-03"):
 
@@ -679,6 +680,83 @@ rm /tmp/chrome_history_tmp.db
 "
 
 From results, create `[Training/Learning]` entries for video/course/reading activity with duration from `mins`. Group consecutive visits to the same site into one entry. Ignore anything < 5 min.
+
+---
+
+### Step 10a: Fetch Cursor IDE Edit Activity *(On-Demand Only — Do NOT run by default)*
+
+**Skip this step during normal routine.** Cursor edit history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
+
+When invoked for a specific `TARGET_DAY` (e.g. "2026-06-05"):
+
+**What to look for — priority order:**
+1. **Work repos** (openedx-platform, frontend-app-authoring, xblocks-contrib, etc.) → `[Coding]`
+2. **CI/config files** (GitHub Actions, Makefile, pyproject.toml) → `[Coding]` or `[Documentation]`
+3. **Non-work paths** (`.tox/`, `site-packages/`, `node_modules/`) → skip
+
+**Query Cursor edit history for the day:**
+```bash
+python3 << 'PYEOF'
+import json, os
+from datetime import datetime, timezone, timedelta
+
+PKT = timezone(timedelta(hours=5))
+TARGET_DAY = "<TARGET_DAY>"  # replace with actual YYYY-MM-DD
+
+history_dir = os.path.expanduser("~/Library/Application Support/Cursor/User/History")
+BASE = "/Users/farhan.khan/MyStuff/Development/Axim/"
+CATEGORY_DIRS = {"frontend_repos", "xblock_repos", "other_repos", "translations_repos", "openedx-platform-workspace"}
+SKIP_DIRS = {".tox", "site-packages", "node_modules", "__pycache__"}
+
+repo_edits = {}
+for root, dirs, files in os.walk(history_dir):
+    if "entries.json" not in files:
+        continue
+    path = os.path.join(root, "entries.json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        resource = d.get("resource", "").replace("file://", "")
+        if BASE not in resource:
+            continue
+        if any(skip in resource for skip in SKIP_DIRS):
+            continue
+        rel = resource[len(BASE):]
+        parts = rel.split("/")
+        repo = parts[1] if parts[0] in CATEGORY_DIRS else parts[0]
+        day_entries = [
+            e for e in d.get("entries", [])
+            if datetime.fromtimestamp(e.get("timestamp", 0) / 1000, tz=PKT).strftime("%Y-%m-%d") == TARGET_DAY
+        ]
+        if day_entries:
+            if repo not in repo_edits:
+                repo_edits[repo] = {"count": 0, "files": set()}
+            repo_edits[repo]["count"] += len(day_entries)
+            repo_edits[repo]["files"].add(os.path.basename(resource))
+    except:
+        pass
+
+for repo, info in sorted(repo_edits.items(), key=lambda x: -x[1]["count"]):
+    files_preview = ", ".join(list(info["files"])[:3])
+    print(f"{repo}: {info['count']} edits, {len(info['files'])} file(s) — {files_preview}")
+PYEOF
+```
+
+**Hour estimation from edit counts per repo:**
+
+| Edit count in a repo | Hours |
+|---|---|
+| 1–3 edits | 0.5h |
+| 4–10 edits | 1.0h |
+| 11–30 edits | 1.5h |
+| 31+ edits | 2.5h |
+
+**How to use in ERP entries:**
+- If the repo already has a GitHub PR entry for this week → do NOT create a duplicate; use as confirmation of the day assignment only
+- If a repo was edited but has no PR for this week → create a `[Coding]` entry: `Worked in <repo-name>` with estimated hours
+- Multiple repos edited → one entry per repo
+
+**Store as `CURSOR_ENTRIES`** — repo name + estimated hours. Carry into synthesis (Step 15). If the same repo appears in GitHub results, do NOT duplicate — use only to enrich the day assignment.
 
 ---
 
@@ -779,14 +857,21 @@ Target: **~8h/day**, max 9.0h, min 6.5h.
 4. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every weekday where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event or existing entry already covers it.
 5. If a weekday has zero signal across all sources, leave it **blank** in the output and add a note: `(no activity detected — leave or holiday?)`.
 
-**After balancing — Chrome history trigger:**
-For every weekday that still has < 6.5h total after steps 1–4 above, ask the user before proceeding to Step 14:
+**After balancing — on-demand supplemental sources trigger:**
+For every weekday that still has < 6.5h total after steps 1–4 above, ask the user before proceeding to Step 15:
 
 > "The following days look thin after pulling all sources:
 > - **YYYY-MM-DD (Day)** — X.Xh logged
-> Would you like me to check Chrome browsing history for these days? It can surface YouTube videos, online courses, and reading/documentation sessions not captured elsewhere. (y / n / skip <day>)"
+> Would you like me to check supplemental sources for these days?
+> - **Chrome history** — surfaces YouTube, online courses, docs reading sessions
+> - **Cursor IDE edits** — surfaces coding sessions not reflected in GitHub PRs yet
+> (both / chrome / cursor / n / skip <day>)"
 
-If the user says yes (or yes for specific days), run Step 9 for each confirmed day, add any `[Training/Learning]` entries found, re-balance, then continue to Step 14. If no, skip Step 9 entirely and proceed.
+If the user confirms:
+- `chrome` or `both` → run Step 10 for each confirmed day, add any `[Training/Learning]` entries found
+- `cursor` or `both` → run Step 10a for each confirmed day, add any `[Coding]` entries found
+
+Re-balance after adding entries, then continue to Step 15. If no, skip both steps and proceed.
 
 ---
 
@@ -800,7 +885,7 @@ Format the log exactly as:
 
 ```
 Week: YYYY-MM-DD .. YYYY-MM-DD
-Sources: GitHub (openedx) | Google Calendar | Gmail (sent) | Slack (#aximprovements) | Chrome history | GitHub board (openedx/projects/55) | Claude artifacts | Accumulated daily entries | Conversation history
+Sources: GitHub (openedx) | Google Calendar | Gmail (sent) | Slack (#aximprovements) | Chrome history | Cursor IDE history | GitHub board (openedx/projects/55) | Claude artifacts | Accumulated daily entries | Conversation history
 GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Gmail: E threads  |  Slack: M messages  |  Board: K items  |  Artifacts: A items  |  Daily entries: D accumulated
 
 --- YYYY-MM-DD (Mon) | X.Xh ---
