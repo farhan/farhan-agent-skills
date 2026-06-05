@@ -619,7 +619,13 @@ From Slack, extract:
 
 ---
 
-### Step 10: Fetch Chrome Browsing History *(On-Demand Only — Do NOT run by default)*
+### Step 10: On-Demand Only Sources
+
+Both sub-steps below are skipped during normal routine. They are only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
+
+---
+
+#### Step 10a: Fetch Chrome Browsing History
 
 **Skip this step during normal routine.** Chrome history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
 
@@ -690,7 +696,7 @@ From results, create `[Training/Learning]` entries for video/course/reading acti
 
 ---
 
-### Step 10a: Fetch Cursor IDE Edit Activity *(On-Demand Only — Do NOT run by default)*
+#### Step 10b: Fetch Cursor IDE Edit Activity
 
 **Skip this step during normal routine.** Cursor edit history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
 
@@ -875,8 +881,8 @@ For every weekday that still has < 6.5h total after steps 1–4 above, ask the u
 > (both / chrome / cursor / n / skip <day>)"
 
 If the user confirms:
-- `chrome` or `both` → run Step 10 for each confirmed day, add any `[Training/Learning]` entries found
-- `cursor` or `both` → run Step 10a for each confirmed day, add any `[Coding]` entries found
+- `chrome` or `both` → run Step 10a for each confirmed day, add any `[Training/Learning]` entries found
+- `cursor` or `both` → run Step 10b for each confirmed day, add any `[Coding]` entries found
 
 Re-balance after adding entries, then continue to Step 15. If no, skip both steps and proceed.
 
