@@ -10,6 +10,27 @@ allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite
 
 Generate a weekly Arbisoft ERP project log, or append a quick daily entry to the ongoing log.
 
+> **Entry length limit:** Each individual project log entry (the `desc` field / the line written per task) must be **≤ 490 characters**. Truncate or summarise the description if it would exceed this. This applies to every entry across all steps.
+
+---
+
+## Required Connectors
+
+All of the following must be available before running weekly mode. Check each before starting.
+
+| Connector | What it provides | How to verify |
+|---|---|---|
+| **GitHub CLI (`gh`)** | PR activity, commits, issues, project board | `gh auth status` — must show `openedx` org access |
+| **Google Calendar MCP** | Meeting events and durations | Connected in Claude.ai → Integrations → Google Calendar |
+| **Gmail MCP** | Sent emails — communication effort and work context | Connected in Claude.ai → Integrations → Gmail |
+| **Slack MCP** | Channel messages, DMs, huddles | Connected in Claude.ai → Integrations → Slack |
+| **Chrome history (local)** | Learning/video/docs sessions (on-demand only) | `~/Library/Application Support/Google/Chrome/Profile 1/History` must exist |
+| **Claude Code artifacts (local)** | Coding session transcripts | `~/.claude/projects/` — always available if Claude Code is installed |
+
+If a connector is unavailable, skip its step and note it in the Sources header of the final log.
+
+---
+
 ---
 
 ## Step 0: Parse Arguments and Route
@@ -183,9 +204,9 @@ Already logged in ERP for week of <WEEK_START>:
   Total already logged: X.Xh
 ```
 
-Store these as `ERP_ENTRIES` — they will be preserved verbatim in Step 16.
+Store these as `ERP_ENTRIES` — they will be preserved verbatim in Step 18.
 
-**Deduplication note:** When generating new entries in Steps 3–11, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Step 2.5) as already-present. Do not create a new entry for something already logged.
+**Deduplication note:** When generating new entries in Steps 3–13, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Step 2.5) as already-present. Do not create a new entry for something already logged.
 
 ---
 
@@ -215,7 +236,83 @@ Store these as `ACCUMULATED_ENTRIES`.
 
 ---
 
-### Step 3: Verify GitHub Auth
+### Step 3: Fetch Google Calendar Events
+
+**Primary calendar ID (hardcoded):** `farhan.khan@arbisoft.com`
+
+Fetch events:
+```
+mcp__claude_ai_Google_Calendar__list_events
+  calendarId: farhan.khan@arbisoft.com
+  startTime: WEEK_START T00:00:00+05:00
+  endTime:   WEEK_END_FRI T23:59:59+05:00
+  pageSize:  50
+```
+
+**Known recurring meetings (use exact durations below):**
+
+| Calendar event | Tag | ERP description | Duration |
+|---|---|---|---|
+| "Axim Sync up + Knowledge Sharing" (daily recurring) | `[Meeting]` | `Axim Daily Syncup` | 0.75h (17:00–17:45 PKT) |
+| "Axim - Grooming Session + DS" (bi-weekly Wed) | `[Meeting]` | `Team Grooming Session` | 1.0h (16:30–17:30 PKT) |
+| "Aximprovements Weekly Sync-up" (Wed after grooming) | `[Meeting]` | `Weekly Aximprovements team sync up meeting with Client` | 0.5h (17:45–18:15 PKT) |
+| "Open edX Core Arch Sync" (weekly Tue ~23:30 PKT) | `[Meeting]` | `Open edX Core Arch Sync` | 1.0h |
+| Any training / I&AI learning session | `[Training/Learning]` | `Attended <event title>` | actual duration |
+| 1:1 or pair session | `[Meeting]` | `1:1 with <person>` | actual duration |
+| Other work meeting | `[Meeting]` | `<calendar event title>` | actual duration |
+| Out-of-office / leave | skip, note as leave day | | |
+| Personal / non-work | skip | | |
+
+Extract duration from event start/end times (round to nearest 0.25h). Calendar duration is authoritative — do NOT use Slack/heuristic estimates for meetings that have a calendar entry.
+
+---
+
+### Step 4: Read Sent Gmail
+
+Read emails **sent** during the target week to surface work context and communication effort not visible in GitHub or Calendar.
+
+**Search sent emails:**
+```
+mcp__claude_ai_Gmail__search_threads
+  query: "from:farhan.khan@arbisoft.com after:WEEK_START before:WEEK_END_FRI"
+  maxResults: 50
+```
+
+**For each thread, read the full content:**
+```
+mcp__claude_ai_Gmail__get_thread
+  threadId: <thread_id>
+```
+
+**Skip automatically (do not create entries or count time for):**
+- GitHub bot notifications and CI alerts
+- Calendar invite accept/decline auto-replies
+- Newsletter subscriptions, marketing, HR announcements
+- Out-of-office auto-replies
+- Emails where the user's sent message is a one-liner ack ("Thanks", "LGTM", "Sounds good")
+
+**Time estimation — for the user's authored message only (not quoted text):**
+
+| Sent message length | Context | Estimated time |
+|---|---|---|
+| < 150 chars | Quick reply / acknowledgement | 0.1h |
+| 150–400 chars | Standard coordination or update | 0.15h |
+| 400–800 chars | Detailed response or summary | 0.25h |
+| > 800 chars | Long technical write-up or report | 0.5h |
+| Thread with 3+ user-authored replies | Ongoing discussion | sum per message, cap at 1.0h |
+
+Sum estimated time **per day** across all qualifying sent emails. Store as `EMAIL_TIME_BY_DAY = { "YYYY-MM-DD": hours }`.
+
+**How to use in ERP entries:**
+1. **Context enrichment (most emails):** If a sent email references a PR, issue, or meeting already captured from another source, use it to enrich that entry's description — do NOT create a duplicate entry.
+2. **Standalone email work ≥ 0.25h in a day:** Create a `[Meeting]` entry: `Email correspondence: <brief topic summary>` with the summed hours for that day.
+3. **Standup emails / daily update emails:** Merge into the existing `Axim Daily Syncup` `[Meeting]` entry — do not create a separate email entry.
+
+**Store qualifying entries as `EMAIL_ENTRIES`** — date + topic + hours. Carry into synthesis (Step 15).
+
+---
+
+### Step 5: Verify GitHub Auth
 
 GitHub username is **`farhan`** (hardcoded — do not resolve dynamically).
 
@@ -229,7 +326,7 @@ Set `GH_USER=farhan`.
 
 ---
 
-### Step 4: Fetch GitHub Activity (openedx org only)
+### Step 6: Fetch GitHub Activity (openedx org only)
 
 Run all three queries. The GitHub search API uses UTC dates; since the user is PKT (UTC+5), extend the range by ±1 day to avoid missing boundary items — query `(WEEK_START-1day)..(WEEK_END_FRI+1day)` and then filter to PKT weekdays during classification.
 
@@ -261,6 +358,29 @@ gh api -X GET "search/issues" \
   -f q="commenter:${GH_USER} is:issue updated:${GH_RANGE} org:openedx" \
   --jq '[.items[] | {number,title,html_url,updated_at,repository_url,body}]'
 ```
+
+**Issues created by user** (bug reports, feature requests, task tracking):
+```bash
+gh api -X GET "search/issues" \
+  -f q="author:${GH_USER} is:issue created:${GH_RANGE} org:openedx" \
+  --jq '[.items[] | {number,title,html_url,state,created_at,updated_at,repository_url,body}]'
+```
+
+**Commits authored directly** (captures branch pushes outside of PRs):
+```bash
+gh api -X GET "search/commits" \
+  -f q="author:${GH_USER} committer-date:${GH_RANGE} org:openedx" \
+  --jq '[.items[] | {sha: .sha[0:7], message: .commit.message, html_url, date: .commit.author.date, repo: .repository.full_name}]'
+```
+
+**PR comments made by user** (inline review comments on others' PRs):
+```bash
+gh api -X GET "search/issues" \
+  -f q="commenter:${GH_USER} is:pr -author:${GH_USER} updated:${GH_RANGE} org:openedx" \
+  --jq '[.items[] | {number,title,html_url,updated_at,repository_url}]'
+```
+
+Merge results with the reviewed PRs set (deduplicate by PR number). A PR where the user left comments but did not formally approve/request-changes → still counts as `[Code Review]`.
 
 ### Detailed PR enrichment (for ALL authored PRs):
 
@@ -316,7 +436,7 @@ gh api "repos/{owner}/{repo}/pulls/{number}" \
 
 ---
 
-### Step 5: Fetch GitHub Project Board Events
+### Step 7: Fetch GitHub Project Board Events
 
 Project board URL: `https://github.com/orgs/openedx/projects/55/views/1`
 
@@ -372,7 +492,7 @@ query {
 
 Filter the results:
 - Keep only items where `content.updatedAt` falls within `WEEK_START..WEEK_END_FRI+1day`
-- Keep only items assigned to `farhan` OR items where the user's authored/reviewed PRs from Step 4 are linked
+- Keep only items assigned to `farhan` OR items where the user's authored/reviewed PRs from Step 6 are linked
 - Note the Status field value (e.g. "In Progress", "In Review", "Done") — use it to corroborate what the user was working on
 
 Use board items to:
@@ -382,38 +502,60 @@ Use board items to:
 
 ---
 
-### Step 6: Fetch Google Calendar Events
+### Step 8: Read Claude Code Artifact History
 
-**Primary calendar ID (hardcoded):** `farhan.khan@arbisoft.com`
+Scan Claude Code's local conversation transcripts and artifact files created during the target week. These capture work done inside coding sessions (debugging, R&D, code writing) that may not appear in GitHub activity or Calendar, making the final log more insightful.
 
-Fetch events:
+**7a — Create date boundary markers and find JSONL conversation logs:**
+```bash
+touch -t $(date -j -f "%Y-%m-%d" "${WEEK_START}" +%Y%m%d0000 2>/dev/null || date -d "${WEEK_START}" +%Y%m%d0000) /tmp/erp_week_start 2>/dev/null
+touch -t $(date -j -f "%Y-%m-%d" "${WEEK_END_FRI}" +%Y%m%d2359 2>/dev/null || date -d "${WEEK_END_FRI}" +%Y%m%d2359) /tmp/erp_week_end 2>/dev/null
+
+find ~/.claude/projects -type f -name "*.jsonl" -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
 ```
-mcp__claude_ai_Google_Calendar__list_events
-  calendarId: farhan.khan@arbisoft.com
-  startTime: WEEK_START T00:00:00+05:00
-  endTime:   WEEK_END_FRI T23:59:59+05:00
-  pageSize:  50
+
+**7b — Also scan the project logs directory for any files created this week:**
+```bash
+find /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs -type f -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
 ```
 
-**Known recurring meetings (use exact durations below):**
+**7c — For each JSONL file found, extract work-relevant content:**
+```bash
+cat <filepath> | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        obj = json.loads(line.strip())
+        role = obj.get('role', '')
+        content = obj.get('content', '')
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    txt = block.get('text', '')[:400]
+                    if txt.strip(): print(role.upper() + ': ' + txt)
+        elif isinstance(content, str) and content.strip():
+            print(role.upper() + ': ' + content[:400])
+    except: pass
+" 2>/dev/null | head -300
+```
 
-| Calendar event | Tag | ERP description | Duration |
-|---|---|---|---|
-| "Axim Sync up + Knowledge Sharing" (daily recurring) | `[Meeting]` | `Axim Daily Syncup` | 0.75h (17:00–17:45 PKT) |
-| "Axim - Grooming Session + DS" (bi-weekly Wed) | `[Meeting]` | `Team Grooming Session` | 1.0h (16:30–17:30 PKT) |
-| "Aximprovements Weekly Sync-up" (Wed after grooming) | `[Meeting]` | `Weekly Aximprovements team sync up meeting with Client` | 0.5h (17:45–18:15 PKT) |
-| "Open edX Core Arch Sync" (weekly Tue ~23:30 PKT) | `[Meeting]` | `Open edX Core Arch Sync` | 1.0h |
-| Any training / I&AI learning session | `[Training/Learning]` | `Attended <event title>` | actual duration |
-| 1:1 or pair session | `[Meeting]` | `1:1 with <person>` | actual duration |
-| Other work meeting | `[Meeting]` | `<event title>` | actual duration |
-| Out-of-office / leave | skip, note as leave day | | |
-| Personal / non-work | skip | | |
+**From the artifact content, extract:**
+- PR/issue URLs referenced in coding sessions
+- Task or feature descriptions ("working on X", "implementing Y", "fixed Z")
+- Debugging or R&D explorations ("investigating issue with …")
+- Time estimates or durations mentioned explicitly
+- Learning resources discussed (videos, docs, articles)
 
-Extract duration from event start/end times (round to nearest 0.25h). Calendar duration is authoritative — do NOT use Slack/heuristic estimates for meetings that have a calendar entry.
+**Store as `ARTIFACT_ENTRIES`** — summarized work items with dates inferred from file modification timestamps or message content. Use alongside other sources in Step 14 (synthesis). If the same PR/issue also appears in GitHub results, do NOT create a duplicate — use the artifact context only to enrich the description.
+
+Clean up:
+```bash
+rm -f /tmp/erp_week_start /tmp/erp_week_end
+```
 
 ---
 
-### Step 7: Fetch Slack Activity from #axim-aximprovements-internal
+### Step 9: Fetch Slack Activity from #axim-aximprovements-internal
 
 **Known values (hardcoded — skip search if unchanged):**
 - Channel ID: `C05NRP1U0CC` (#axim-aximprovements-internal)
@@ -478,58 +620,69 @@ From Slack, extract:
 
 ---
 
-### Step 8: Fetch Chrome Browsing History
+### Step 10: Fetch Chrome Browsing History *(On-Demand Only — Do NOT run by default)*
 
-Chrome history DB is at:
-```
-~/Library/Application Support/Google/Chrome/Default/History
-```
+**Skip this step during normal routine.** Chrome history is only queried after Step 13 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 13.
 
-Since Chrome may have a lock on this file, copy it first:
+When invoked for a specific `TARGET_DAY` (e.g. "2026-06-03"):
+
+**What to look for — priority order:**
+1. **YouTube / online courses / video learning** → `[Training/Learning]` — this is the highest-value signal; a YouTube visit of 10+ min is almost certainly a learning session
+2. **Documentation and reading material** — official docs, blog posts, articles, Confluence, OpenEdX discuss → `[R&D]` or `[Training/Learning]`
+3. **Local OpenEdX dev** (`apps.local.openedx.io`) — confirms hands-on testing/debugging not captured in GitHub
+4. **Do NOT create entries for Gmail, GitHub (already fetched via MCP), or ERP** — those are covered by other steps
+
+**Query for a single day** (Chrome stores timestamps as microseconds since 1601-01-01; active profile is `Profile 1`):
 ```bash
-cp ~/Library/Application\ Support/Google/Chrome/Default/History /tmp/chrome_history_tmp.db
-```
+cp ~/Library/Application\ Support/Google/Chrome/Profile\ 1/History /tmp/chrome_history_tmp.db
 
-Query for work-relevant URLs visited during the week (Chrome stores timestamps as microseconds since 1601-01-01):
-```bash
 sqlite3 /tmp/chrome_history_tmp.db "
-SELECT url, title,
-  datetime(last_visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') as visited_pkt
-FROM urls
-WHERE visited_pkt >= '<WEEK_START> 00:00:00'
-  AND visited_pkt <= '<WEEK_END_FRI> 23:59:59'
+SELECT
+  time(v.visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') as time_pkt,
+  round(v.visit_duration / 1000000.0 / 60, 1) as mins,
+  u.url,
+  substr(u.title, 1, 80) as title
+FROM visits v
+JOIN urls u ON u.id = v.url
+WHERE date(v.visit_time/1000000 - 11644473600, 'unixepoch', '+5 hours') = '<TARGET_DAY>'
+  AND v.visit_duration > 15000000
   AND (
-    url LIKE '%github.com/openedx%'
-    OR url LIKE '%github.com/orgs/openedx%'
-    OR url LIKE '%docs.openedx.org%'
-    OR url LIKE '%discuss.openedx.org%'
-    OR url LIKE '%openedx.atlassian.net%'
-    OR url LIKE '%erp.arbisoft.com%'
-    OR url LIKE '%youtu%'
-    OR url LIKE '%developer.mozilla.org%'
-    OR url LIKE '%stackoverflow.com%'
-    OR url LIKE '%docs.djangoproject.com%'
-    OR url LIKE '%docs.python.org%'
-    OR url LIKE '%confluence%'
+    u.url LIKE '%youtu%'
+    OR u.url LIKE '%udemy.com%'
+    OR u.url LIKE '%coursera.org%'
+    OR u.url LIKE '%linkedin.com/learning%'
+    OR u.url LIKE '%developer.mozilla.org%'
+    OR u.url LIKE '%stackoverflow.com%'
+    OR u.url LIKE '%docs.python.org%'
+    OR u.url LIKE '%docs.djangoproject.com%'
+    OR u.url LIKE '%docs.openedx.org%'
+    OR u.url LIKE '%discuss.openedx.org%'
+    OR u.url LIKE '%openedx.atlassian.net%'
+    OR u.url LIKE '%apps.local%'
+    OR u.url LIKE '%confluence%'
+    OR u.url LIKE '%medium.com%'
+    OR u.url LIKE '%substack.com%'
+    OR u.url LIKE '%docs.google.com%'
+    OR u.url LIKE '%slides.google.com%'
+    OR u.url LIKE '%sheets.google.com%'
+    OR u.url LIKE '%claude.ai%'
+    OR u.url LIKE '%anthropic.com%'
+    OR u.url LIKE '%notion.so%'
+    OR u.url LIKE '%readthedocs.io%'
+    OR u.url LIKE '%dev.to%'
+    OR u.url LIKE '%hashnode%'
   )
-ORDER BY last_visit_time ASC;
+ORDER BY v.visit_time ASC;
 "
-```
 
-Use browsing history to:
-- **Corroborate** GitHub activity: visited PR/issue URLs confirm they were actively worked on that specific day (use for day assignment)
-- **Surface learning/research:** YouTube videos, docs, StackOverflow, MDN → `[Training/Learning]` or enrich `[R&D]` descriptions
-- **Identify exact working day** for a PR that spans multiple days (the day with the most visits = primary work day)
-- **Do NOT create entries for browsing alone** unless it clearly represents distinct research not otherwise captured (e.g., a doc page with no related GitHub issue)
-
-Clean up:
-```bash
 rm /tmp/chrome_history_tmp.db
-```
+"
+
+From results, create `[Training/Learning]` entries for video/course/reading activity with duration from `mins`. Group consecutive visits to the same site into one entry. Ignore anything < 5 min.
 
 ---
 
-### Step 9: Mine Conversation History
+### Step 11: Mine Conversation History
 
 Re-read the current conversation for any activity the user mentioned during the target week:
 - PR links or issue links not captured by GitHub search
@@ -541,7 +694,7 @@ Add these as supplementary entries. These are authoritative — prefer them over
 
 ---
 
-### Step 10: Classify Each Item
+### Step 12: Classify Each Item
 
 Apply these rules in order:
 
@@ -586,7 +739,7 @@ Apply these rules in order:
 
 ---
 
-### Step 11: Estimate Hours Per Item
+### Step 13: Estimate Hours Per Item
 
 | Item type | Hours |
 |---|---|
@@ -616,7 +769,7 @@ For items already in `ACCUMULATED_ENTRIES`, use the hours from those entries —
 
 ---
 
-### Step 12: Balance Daily Hours
+### Step 14: Balance Daily Hours
 
 Target: **~8h/day**, max 9.0h, min 6.5h.
 
@@ -626,16 +779,29 @@ Target: **~8h/day**, max 9.0h, min 6.5h.
 4. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every weekday where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event or existing entry already covers it.
 5. If a weekday has zero signal across all sources, leave it **blank** in the output and add a note: `(no activity detected — leave or holiday?)`.
 
+**After balancing — Chrome history trigger:**
+For every weekday that still has < 6.5h total after steps 1–4 above, ask the user before proceeding to Step 14:
+
+> "The following days look thin after pulling all sources:
+> - **YYYY-MM-DD (Day)** — X.Xh logged
+> Would you like me to check Chrome browsing history for these days? It can surface YouTube videos, online courses, and reading/documentation sessions not captured elsewhere. (y / n / skip <day>)"
+
+If the user says yes (or yes for specific days), run Step 9 for each confirmed day, add any `[Training/Learning]` entries found, re-balance, then continue to Step 14. If no, skip Step 9 entirely and proceed.
+
 ---
 
-### Step 13: Render the Output
+### Step 15: Render the Output
+
+**Model override:** This is the synthesis step — spawn an `Agent` subagent with `model: "opus"` and pass it all collected data (GitHub results, Calendar events, Slack signals, Chrome history, ARTIFACT_ENTRIES, ERP_ENTRIES, ACCUMULATED_ENTRIES, conversation notes) as context. The Opus subagent applies Steps 12–14 classification/balancing rules and produces the final formatted log below. Return the rendered log back to the main skill context.
+
+> **Reminder — entry length limit:** Every entry description must be **≤ 490 characters**. Truncate before writing.
 
 Format the log exactly as:
 
 ```
 Week: YYYY-MM-DD .. YYYY-MM-DD
-Sources: GitHub (openedx) | Google Calendar | Slack (#aximprovements) | Chrome history | GitHub board (openedx/projects/55) | Accumulated daily entries | Conversation history
-GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Slack: M messages  |  Board: K items  |  Daily entries: D accumulated
+Sources: GitHub (openedx) | Google Calendar | Gmail (sent) | Slack (#aximprovements) | Chrome history | GitHub board (openedx/projects/55) | Claude artifacts | Accumulated daily entries | Conversation history
+GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Gmail: E threads  |  Slack: M messages  |  Board: K items  |  Artifacts: A items  |  Daily entries: D accumulated
 
 --- YYYY-MM-DD (Mon) | X.Xh ---
 [Tag] - Description (X.X)
@@ -664,7 +830,7 @@ Entry ordering within each day:
 
 ---
 
-### Step 14: Write the Log File
+### Step 16: Write the Log File
 
 Create the directory if it doesn't exist:
 ```bash
@@ -684,7 +850,7 @@ Use the Write tool. Confirm the file path to the user after writing.
 
 ---
 
-### Step 15: Ask for Adjustments
+### Step 17: Ask for Adjustments
 
 After writing the file, show the full content in chat and ask:
 > "Adjust anything? (e.g., 'move PR #35 to Tuesday', 'add 1h learning on Thursday', 'the grooming was on Wednesday', 'I was on leave Friday')"
@@ -693,7 +859,7 @@ If the user requests changes, apply them, rewrite the file, and confirm.
 
 ---
 
-### Step 16: Generate DevTools Submission Script
+### Step 18: Generate DevTools Submission Script
 
 After the log file is finalised, **always** write the script to:
 ```
@@ -827,4 +993,4 @@ Tell the user:
 /erp-log d on Monday: investigated issue #234, 2h
 ```
 
-The ERP URL is optional for log generation but required for the DevTools JS script (Step 16). Always extract the LOG_ID from it when provided.
+The ERP URL is optional for log generation but required for the DevTools JS script (Step 18). Always extract the LOG_ID from it when provided.
