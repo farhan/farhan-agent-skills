@@ -1,7 +1,7 @@
 ---
 name: erp-log
 description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with accumulated daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
-version: 3.1.0
+version: 3.2.0
 model: haiku
 allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
@@ -60,7 +60,8 @@ Where `WEEK_DIR` uses format `Mon, Jun 01 to Sun, Jun 07`:
 
 Files per directory:
 - `erp_log.txt` — accumulated daily entries, refined to final log on weekly run
-- `devtools_fill_log.js` — ready-to-paste DevTools submission script
+- `devtools_fill_log_js.txt` — ready-to-paste DevTools submission script (`.txt` prevents smart-quote mangling when copying from editors)
+- `data/` — raw data dumps from each fetch step (created at start of weekly run)
 
 ---
 
@@ -169,6 +170,32 @@ Store:
 - `GH_RANGE` = `YYYY-MM-DD..YYYY-MM-DD` (Mon..Fri, used in GitHub queries)
 - `WEEK_DIR` = `Mon, {MMM DD} to Sun, {MMM DD}` (e.g. `Mon, Jun 01 to Sun, Jun 07`)
 - `LOG_DIR` = `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>`
+
+---
+
+### Step 1.5: Create Data Directory
+
+At the start of every weekly run (before Step 2), create the raw-data directory:
+
+```bash
+mkdir -p "<LOG_DIR>/data"
+```
+
+After each data-fetching step, write its raw output to a numbered `.txt` file inside `data/` using the Write tool:
+
+| Step | File | Contents |
+|---|---|---|
+| Step 2 | `data/01_erp_existing.txt` | ERP JSON response pasted by user |
+| Step 3 | `data/02_calendar.txt` | Google Calendar events |
+| Step 4 | `data/03_gmail.txt` | Gmail sent threads |
+| Step 6 | `data/04_github_prs.txt` | GitHub PR/issue query results |
+| Step 7 | `data/05_github_board.txt` | Project board GraphQL result |
+| Step 8 | `data/06_claude_artifacts.txt` | Claude artifact JSONL content |
+| Step 9 | `data/07_slack.txt` | Slack search results |
+| Step 10a | `data/08_chrome.txt` | Chrome history query output (if run) |
+| Step 10b | `data/09_cursor.txt` | Cursor IDE edit output (if run) |
+
+Write each file immediately after fetching. This enables auditing the log, rerunning synthesis without re-fetching, and reviewing what Claude actually saw.
 
 ---
 
@@ -894,6 +921,10 @@ Re-balance after adding entries, then continue to Step 15. If no, skip both step
 
 > **Reminder — entry length limit:** Every entry description must be **≤ 490 characters**. Truncate before writing.
 
+> **Description style — use short natural half-sentences, not formal complete sentences.**
+> Prefer: `"did manual testing; added console logs to 9 files"` over `"Tested Remove Legacy UI Waffle Flags on local OpenEdX dev env verifying Phase 1a routes."`
+> Pattern: `"did X; worked on Y; resolved Z"` — fragments joined by semicolons are fine. Avoid subject-verb-object formality.
+
 Format the log exactly as:
 
 ```
@@ -961,14 +992,14 @@ If the user requests changes, apply them, rewrite the file, and confirm.
 
 After the log file is finalised, **always** write the script to:
 ```
-<LOG_DIR>/devtools_fill_log.js
+<LOG_DIR>/devtools_fill_log_js.txt
 ```
 
-i.e. `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/devtools_fill_log.js`
+i.e. `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/devtools_fill_log_js.txt`
 
 Never add a date suffix — one file per week directory, overwrite each time.
 
-**Why a file, not chat code:** Copying JS from chat causes smart-quote mangling (`'` → `'`) which breaks JavaScript parsing. Always write to disk — user copies from the file in their editor.
+**Why `.txt`, not `.js`:** Copying JS from chat (or from a `.js` file in some editors) causes smart-quote mangling (`'` → `'`) which breaks JavaScript parsing. The `.txt` extension prevents this and avoids browser security prompts. Always write to disk — user copies from the file in their editor.
 
 **CRITICAL — ENTRIES must include all three sources:**
 The PATCH request replaces all tasks for the project. Therefore the ENTRIES array must contain:
@@ -1072,7 +1103,7 @@ For existing entries where `label_option` was null, infer the labelId from the d
 ```
 
 Tell the user:
-> "Script written to `logs/<WEEK_DIR>/devtools_fill_log.js`. Open it in VS Code, Cmd+A → Cmd+C, then paste into Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`. This saves a draft — refresh the page to review, then submit manually."
+> "Script written to `logs/<WEEK_DIR>/devtools_fill_log_js.txt`. Open it in VS Code, Cmd+A → Cmd+C, then paste into Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`. This saves a draft — refresh the page to review, then submit manually."
 
 ---
 
