@@ -52,11 +52,22 @@ All files for a week live under:
 
 Where `WEEK_DIR` uses format `Mon, Jun 01 to Sun, Jun 07`:
 - `WEEK_START` = Monday of the target week
-- `WEEK_END_SUN` = WEEK_START + 6 days (Sunday)
+- `WEEK_END_SUN` = WEEK_START + 6 days (Sunday) — **always 6 days after WEEK_START, never the same day**
 - `WEEK_END_FRI` = WEEK_START + 4 days (Friday)
 - `WEEK_DIR` = `Mon, {MMM DD} to Sun, {MMM DD}` — e.g. `Mon, Jun 01 to Sun, Jun 07`
   - Use zero-padded day (`01`, `07`, `25`)
   - Month abbreviation: Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec
+  - **Always spans 7 calendar days: Monday through Sunday**
+  - **NEVER use WEEK_END_FRI in the directory name** — the directory always ends on Sunday
+
+**Compute dates with bash to avoid arithmetic errors:**
+```bash
+WEEK_START="2026-06-08"  # replace with actual Monday
+WEEK_END_FRI=$(date -j -v+4d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d" 2>/dev/null || date -d "$WEEK_START + 4 days" "+%Y-%m-%d")
+WEEK_END_SUN=$(date -j -v+6d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d" 2>/dev/null || date -d "$WEEK_START + 6 days" "+%Y-%m-%d")
+WEEK_DIR=$(date -j -f "%Y-%m-%d" "$WEEK_START" "Mon, %b %d" 2>/dev/null | sed 's/ 0/ /; s/^0//')$(echo " to ")$(date -j -f "%Y-%m-%d" "$WEEK_END_SUN" "Sun, %b %d" 2>/dev/null | sed 's/ 0/ /; s/^0//')
+echo "WEEK_DIR: $WEEK_DIR"   # verify before mkdir
+```
 
 Files per directory:
 - `erp_log.txt` — accumulated daily entries, refined to final log on weekly run
