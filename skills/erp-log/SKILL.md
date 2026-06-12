@@ -14,6 +14,10 @@ Generate a weekly Arbisoft ERP project log, or append a quick daily entry to the
 
 > **Entry length limit:** Each individual project log entry (the `desc` field / the line written per task) must be **≤ 490 characters**. Truncate or summarise the description if it would exceed this. This applies to every entry across all steps.
 
+> **No diff stats in descriptions:** Never include LOC or file-count stats like `(+172/-168, 2 files)` in any entry description — in erp_log.txt or in the devtools ENTRIES array. These are noise; the PR number already links to the diff. Describe *what was done and found*, not how large the diff was.
+
+> **erp_log.txt may use newlines:** The human-readable log file (`erp_log.txt`) may wrap long entry descriptions across multiple lines using indented continuation lines for readability. The `desc` field in `devtools_fill_log_js.txt` must stay a single-line string.
+
 ---
 
 ## Required Connectors
@@ -1017,6 +1021,12 @@ Apply these rules in order:
 | PR reviewed, ≤200 LOC | 1.5h |
 | PR reviewed, 200–600 LOC | 2.0h |
 | PR reviewed, >600 LOC | 2.5h |
+
+> **Code review checkout+test overhead (always apply):** This user *always* manually checks out the reviewed branch and runs the test suite (or the PR's specific test commands) before approving. Add the following on top of the base review hours above:
+> - Small PR (≤200 LOC) or trivial fix: +0.25h
+> - Medium PR (200–600 LOC): +0.5h
+> - Large PR (>600 LOC) or complex test setup (multiple tox envs, Tutor mount, multi-phase local test): +0.75–1.0h
+> - Multi-round review (CHANGES_REQUESTED → re-review → approve): apply the overhead to each round separately.
 | Issue commented (1 comment by user) | 1.0h |
 | Issue commented (2–3 comments by user) | 2.0h |
 | Issue commented (4+ comments by user) | 3.0h |
@@ -1064,12 +1074,15 @@ If confirmed, run Step 10a/10b for those days and add any entries found. Then co
 
 > **Reminder — entry length limit:** Every entry description must be **≤ 490 characters**. Truncate before writing.
 
-> **Description style — rich, specific, context-loaded. Use the artifact summaries to make entries informative:**
-> - Prefer: `"debugged flaky XBlock serialisation test; narrowed to a race condition in course export; added console logs to 9 files"` over `"Worked on following PR: https://..."`
-> - Lead with what was actually done, then add the PR/issue URL as supporting reference
-> - Pattern: `"did X; worked on Y; resolved Z — <url>"` — fragments joined by semicolons are fine
-> - For multi-day PRs, the description should reflect what specifically happened *that day* (wrote tests, addressed review, fixed merge conflict) not just "worked on PR"
-> - Avoid subject-verb-object formality; short natural phrases preferred
+> **Description style — rich, specific, context-loaded. Match GitHub activity with Claude Code artifact prompts to surface what was actually done:**
+> - Prefer: `"XBlock#917 — fold web_fragments: ran uv sync, verified web_fragments.__file__ resolves to local package; flagged missing subpackage declarations and broken test discovery; CHANGES_REQUESTED"` over `"Reviewed following PR: https://..."`
+> - Lead with what was actually done (test commands run, findings, decisions made, specific files touched), then add the PR/issue reference
+> - Pattern: `"did X; ran Y; found Z; decided W"` — fragments joined by semicolons are fine; no need for full sentences
+> - Cross-reference the Claude artifact prompts with GitHub activity to reconstruct the actual steps — if prompts mention merge conflicts in specific files, name them; if they mention running a test suite, name the command
+> - For multi-day PRs, describe what specifically happened *that day* (wrote tests, addressed review round 2, resolved conflict in File.tsx) not just "worked on PR"
+> - For code reviews, name what was checked: specific flags found, test environments run (tox -e django42), Tutor mount test, etc.
+> - **Never include LOC/file-count stats** like `(+790/-24, 21 files)` — describe the purpose and findings instead
+> - Avoid subject-verb-object formality; short natural technical phrases preferred
 
 **Default scope — Mon through Fri.** Only include Sat/Sun sections if the user explicitly requested weekend logs in their invocation.
 
