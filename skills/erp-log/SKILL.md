@@ -1,14 +1,16 @@
 ---
 name: erp-log
-description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with accumulated daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
-version: 3.2.0
-model: haiku
-allowed-tools: Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
+description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with manual daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
+version: 3.6.0
+model: sonnet
+allowed-tools: Agent, Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
 
 # erp-log
 
 Generate a weekly Arbisoft ERP project log, or append a quick daily entry to the ongoing log.
+
+> **Data transparency:** Every data source fetched during a weekly run is appended verbatim to `<LOG_DIR>/data.txt` as each parallel agent completes. The file is organised **by source** — one `SOURCE: [name]` block per data source, each containing a sub-section for every day Mon–Sun. Sources: Manual daily entries (pre-existing from daily mode) | Calendar | GitHub activities | Gmail (sent) | Slack | Claude Code artifacts | Conversation history. This makes it easy to audit what Claude saw, debug missing entries, and re-run synthesis without re-fetching.
 
 > **Entry length limit:** Each individual project log entry (the `desc` field / the line written per task) must be **≤ 490 characters**. Truncate or summarise the description if it would exceed this. This applies to every entry across all steps.
 
@@ -70,9 +72,9 @@ echo "WEEK_DIR: $WEEK_DIR"   # verify before mkdir
 ```
 
 Files per directory:
-- `erp_log.txt` — accumulated daily entries, refined to final log on weekly run
+- `data.txt` — all entries and raw data: manual daily entries (appended by daily mode) + raw source dumps from each parallel agent (appended during weekly run)
+- `erp_log.txt` — final synthesized log, written once per weekly run (Step 16); clean and submission-ready
 - `devtools_fill_log_js.txt` — ready-to-paste DevTools submission script (`.txt` prevents smart-quote mangling when copying from editors)
-- `data/` — raw data dumps from each fetch step (created at start of weekly run)
 
 ---
 
@@ -93,7 +95,7 @@ Compute:
 - `WEEK_END_FRI` = WEEK_START + 4 days
 - `WEEK_DIR` = formatted directory name (see Step 0)
 - `LOG_DIR` = `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>`
-- `LOG_FILE` = `<LOG_DIR>/erp_log.txt`
+- All entries and data → `<LOG_DIR>/data.txt`
 
 ### Step D2: Parse the Task Content
 
@@ -126,10 +128,10 @@ Create the directory if it doesn't exist:
 mkdir -p "<LOG_DIR>"
 ```
 
-If `erp_log.txt` does not exist yet, create it with this header:
+If `data.txt` does not exist yet, create it with this header:
 ```
 Week: WEEK_START .. WEEK_END_FRI
---- Accumulated daily entries ---
+--- Manual daily entries ---
 ```
 
 Append each entry as one line:
@@ -148,7 +150,7 @@ Hours format: bare decimal, no `h` suffix (`0.5`, `2.5`).
 ### Step D4: Confirm to User
 
 Show what was added:
-> "Added to `logs/<WEEK_DIR>/erp_log.txt`:"
+> "Added to `logs/<WEEK_DIR>/data.txt`:"
 > `2026-06-02 [Coding] - Worked on following PR: ... (2.5)`
 
 List all entries if multiple were added.
@@ -184,29 +186,30 @@ Store:
 
 ---
 
-### Step 1.5: Create Data Directory
+### Step 1.5: Create Week Directory and Initialize data.txt
 
-At the start of every weekly run (before Step 2), create the raw-data directory:
+Create the week directory and initialize the data dump file:
 
 ```bash
-mkdir -p "<LOG_DIR>/data"
+mkdir -p "<LOG_DIR>"
 ```
 
-After each data-fetching step, write its raw output to a numbered `.txt` file inside `data/` using the Write tool:
+Check if `data.txt` already exists (daily mode may have written manual entries into it):
 
-| Step | File | Contents |
-|---|---|---|
-| Step 2 | `data/01_erp_existing.txt` | ERP JSON response pasted by user |
-| Step 3 | `data/02_calendar.txt` | Google Calendar events |
-| Step 4 | `data/03_gmail.txt` | Gmail sent threads |
-| Step 6 | `data/04_github_prs.txt` | GitHub PR/issue query results |
-| Step 7 | `data/05_github_board.txt` | Project board GraphQL result |
-| Step 8 | `data/06_claude_artifacts.txt` | Claude artifact JSONL content |
-| Step 9 | `data/07_slack.txt` | Slack search results |
-| Step 10a | `data/08_chrome.txt` | Chrome history query output (if run) |
-| Step 10b | `data/09_cursor.txt` | Cursor IDE edit output (if run) |
+```bash
+ls "<LOG_DIR>/data.txt" 2>/dev/null
+```
 
-Write each file immediately after fetching. This enables auditing the log, rerunning synthesis without re-fetching, and reviewing what Claude actually saw.
+- **If it does NOT exist:** create it with the Write tool containing only:
+  ```
+  Week: WEEK_START .. WEEK_END_FRI
+  --- Manual daily entries ---
+  === DATA DUMP — Week of WEEK_START .. WEEK_END_SUN ===
+  (source blocks appended below as agents complete)
+  ```
+- **If it exists:** append the `=== DATA DUMP ===` header line below the existing content using `cat >>` via Bash — do NOT overwrite, or the manual daily entries already there will be lost.
+
+As each agent's result arrives in the fan-in step (Step 9.9), the **main context** appends that agent's data block to `data.txt` — agents themselves only return text, they do not write files.
 
 ---
 
@@ -243,33 +246,51 @@ Already logged in ERP for week of <WEEK_START>:
 
 Store these as `ERP_ENTRIES` — they will be preserved verbatim in Step 18.
 
-**Deduplication note:** When generating new entries in Steps 3–13, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Step 2.5) as already-present. Do not create a new entry for something already logged.
+**Deduplication note:** When generating new entries in Steps 3–13, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Manual daily entries, Step 2.5) as already-present. Do not create a new entry for something already logged.
 
 ---
 
-### Step 2.5: Read Accumulated Daily Entries
+### Step 2.5: Read Manual Daily Entries
 
-Check if `<LOG_DIR>/erp_log.txt` exists:
+Check if `<LOG_DIR>/data.txt` exists:
 ```bash
-ls "<LOG_DIR>/erp_log.txt" 2>/dev/null
+ls "<LOG_DIR>/data.txt" 2>/dev/null
 ```
 
-If it exists, read it and parse all lines matching the format:
+If it exists, parse all lines matching the format (these are the manual daily entries written by daily mode):
 ```
 YYYY-MM-DD [TAG] - Description (hours)
 ```
 
 Display a summary:
 ```
-Accumulated daily entries from log file:
+Manual daily entries from data.txt:
   2026-06-01 [Coding] - Worked on PR #123 (2.5)
   2026-06-02 [Meeting] - Axim Daily Syncup (0.5)
-  Total accumulated: X.Xh
+  Total manual: X.Xh
 ```
 
 Store these as `ACCUMULATED_ENTRIES`.
 
-**Deduplication with ERP_ENTRIES:** If an accumulated entry matches an ERP entry (same date + same or similar description), mark it as covered — do not include it again in the final output.
+**Deduplication with ERP_ENTRIES:** If a manual entry matches an ERP entry (same date + same or similar description), mark it as covered — do not include it again in the final output.
+
+---
+
+### Step 2.8: Fan-out — Spawn Parallel Data-Fetching Agents
+
+Spawn all five agents **simultaneously** using the Agent tool. Do not wait for one to finish before launching the next — all five run in parallel. Pass `WEEK_START`, `WEEK_END_FRI`, `WEEK_END_SUN`, `GH_RANGE`, and `LOG_DIR` to each agent as context in their prompt.
+
+| Agent | Sources covered | Step instructions to follow |
+|---|---|---|
+| **Agent A — Calendar** | Google Calendar | Step 3 |
+| **Agent B — Gmail** | Sent Gmail threads | Step 4 |
+| **Agent C — GitHub** | GitHub PRs, issues, commits, project board | Steps 5, 6, 7 |
+| **Agent D — Slack** | Slack channel + huddle search | Step 9 |
+| **Agent E — Artifacts** | Claude Code conversation artifacts | Step 8 |
+
+Each agent executes the detailed instructions for its assigned step(s) and returns **structured text grouped by PKT day**. The step instructions below (Steps 3–9) are the authoritative prompt for each agent.
+
+After all five agents return, proceed to Step 9.9 (fan-in).
 
 ---
 
@@ -541,54 +562,117 @@ Use board items to:
 
 ### Step 8: Read Claude Code Artifact History
 
-Scan Claude Code's local conversation transcripts and artifact files created during the target week. These capture work done inside coding sessions (debugging, R&D, code writing) that may not appear in GitHub activity or Calendar, making the final log more insightful.
+Extract every human-typed prompt from Claude Code JSONL conversation files whose message timestamps fall within the target week. Return them verbatim — no summarising, no paraphrasing. These are used in data.txt as a raw audit trail and by the synthesis step to produce richer log descriptions.
 
-**8a — Create date boundary markers and find JSONL conversation logs:**
+**JSONL file structure (Claude Code format):**
+Each line is a JSON object with `type` (not `role`). User turns look like:
+```json
+{"type": "user", "isMeta": false, "message": {"role": "user", "content": "..."}, "timestamp": "2026-06-08T...Z", ...}
+```
+Skip any entry where `isMeta` is `true` — those are system/hook messages, not human prompts.
+
+**8a — Find all top-level session JSONL files (skip subagent files):**
 ```bash
-touch -t $(date -j -f "%Y-%m-%d" "${WEEK_START}" +%Y%m%d0000 2>/dev/null || date -d "${WEEK_START}" +%Y%m%d0000) /tmp/erp_week_start 2>/dev/null
-touch -t $(date -j -f "%Y-%m-%d" "${WEEK_END_FRI}" +%Y%m%d2359 2>/dev/null || date -d "${WEEK_END_FRI}" +%Y%m%d2359) /tmp/erp_week_end 2>/dev/null
-
-find ~/.claude/projects -type f -name "*.jsonl" -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
+find ~/.claude/projects -type f -name "*.jsonl" \
+  | grep -v "/subagents/" \
+  2>/dev/null
 ```
 
-**8b — Also scan the project logs directory for any files created this week:**
-```bash
-find /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs -type f -newer /tmp/erp_week_start ! -newer /tmp/erp_week_end 2>/dev/null
-```
+**8b — Extract human prompts via Python, filtered to the target week by message timestamp:**
 
-**8c — For each JSONL file found, extract work-relevant content:**
-```bash
-cat <filepath> | python3 -c "
-import sys, json
-for line in sys.stdin:
+```python
+import json, os, re
+from datetime import datetime, timezone, timedelta
+
+PKT = timezone(timedelta(hours=5))
+WEEK_START = datetime(YEAR, MONTH, START_DAY, tzinfo=PKT)   # replace with actual values
+WEEK_END   = datetime(YEAR, MONTH, END_DAY,   tzinfo=PKT)   # WEEK_END_FRI + 1 day
+
+SKIP_PREFIXES = (
+    "<task-notification", "<command-name", "<system-reminder",
+    "<local-command", "<user-prompt-submit", "<persisted-output",
+)
+
+def extract_text(content):
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text", "").strip()
+                if t: parts.append(t)
+        return "\n".join(parts)
+    return ""
+
+all_prompts = []  # (ts_pkt, project, session_id[:8], text)
+
+for fpath in TOP_LEVEL_FILES:   # list from step 8a (non-subagent only)
+    project = os.path.basename(os.path.dirname(fpath))
+    session = os.path.basename(fpath).replace(".jsonl","")[:8]
     try:
-        obj = json.loads(line.strip())
-        role = obj.get('role', '')
-        content = obj.get('content', '')
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get('type') == 'text':
-                    txt = block.get('text', '')[:400]
-                    if txt.strip(): print(role.upper() + ': ' + txt)
-        elif isinstance(content, str) and content.strip():
-            print(role.upper() + ': ' + content[:400])
+        with open(fpath, "r", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                try: obj = json.loads(line)
+                except: continue
+                if obj.get("type") != "user": continue
+                if obj.get("isMeta", False): continue
+                msg = obj.get("message", {})
+                if msg.get("role") != "user": continue
+
+                # Filter by message timestamp, not file mtime
+                try:
+                    ts = datetime.fromisoformat(
+                        obj["timestamp"].replace("Z", "+00:00")
+                    ).astimezone(PKT)
+                except:
+                    continue
+                if not (WEEK_START <= ts < WEEK_END):
+                    continue
+
+                text = extract_text(msg.get("content", ""))
+                if not text or len(text) < 10: continue
+
+                # Skip automated/system content
+                if any(text.strip().startswith(p) for p in SKIP_PREFIXES): continue
+                # Strip leading XML tags from mixed content
+                cleaned = re.sub(r'^(<[^>]+>[^<]*</[^>]+>\s*)+', '', text).strip()
+                if not cleaned or len(cleaned) < 10: continue
+
+                all_prompts.append((ts, project, session, cleaned))
     except: pass
-" 2>/dev/null | head -300
+
+all_prompts.sort(key=lambda x: x[0])
 ```
 
-**From the artifact content, extract:**
-- PR/issue URLs referenced in coding sessions
-- Task or feature descriptions ("working on X", "implementing Y", "fixed Z")
-- Debugging or R&D explorations ("investigating issue with …")
-- Time estimates or durations mentioned explicitly
-- Learning resources discussed (videos, docs, articles)
+**8c — Format output grouped by session, in chronological order:**
 
-**Store as `ARTIFACT_ENTRIES`** — summarized work items with dates inferred from file modification timestamps or message content. Use alongside other sources in Step 15 (synthesis). If the same PR/issue also appears in GitHub results, do NOT create a duplicate — use the artifact context only to enrich the description.
-
-Clean up:
-```bash
-rm -f /tmp/erp_week_start /tmp/erp_week_end
 ```
+========================================================================
+SESSION <id8>  |  <project-dir-name>
+========================================================================
+
+[2026-06-08 Mon 11:46 PKT — Turn 1]
+<full prompt text, no truncation>
+
+[2026-06-08 Mon 11:49 PKT — Turn 2]
+<full prompt text, no truncation>
+
+========================================================================
+SESSION <id8>  |  <project-dir-name>
+========================================================================
+...
+
+Total prompts: N across M sessions
+```
+
+- Do **not** truncate prompt text — return it in full.
+- Do **not** synthesise or summarise — the raw text is what goes into data.txt.
+- Sessions with zero qualifying prompts within the week are silently omitted.
+
+**Store as `ARTIFACT_DATA`** — the full formatted string above. The main context appends it to `data.txt` verbatim (Step 9.9). During synthesis (Step 15), use it to enrich descriptions for GitHub entries — e.g. if a session mentions merge conflicts in specific files, carry that detail into the PR entry's description.
 
 ---
 
@@ -657,15 +741,55 @@ From Slack, extract:
 
 ---
 
+### Step 9.9: Fan-in — Collect Results and Write data.txt Incrementally
+
+As each parallel agent (A–E) completes, **immediately** append its data to `<LOG_DIR>/data.txt` and store its result — do not wait for all agents before writing. Use `cat >>` via Bash (the Write tool overwrites; it cannot append).
+
+**data.txt append format — one block per agent, grouped by day:**
+
+```
+===========================================================================
+SOURCE: [Calendar events]
+===========================================================================
+
+--- YYYY-MM-DD (Mon) ---
+17:00–17:45 PKT — Axim Sync up + Knowledge Sharing (0.75h)
+
+--- YYYY-MM-DD (Tue) ---
+(none)
+
+... (one sub-section per day, Mon through Sun)
+```
+
+Repeat this block structure for each agent as it completes:
+- Agent A done → append `SOURCE: [Calendar events]` block
+- Agent B done → append `SOURCE: [Gmail (sent)]` block
+- Agent C done → append `SOURCE: [GitHub activities]` block (split into authored PRs / reviewed PRs / issues / commits / board items sub-sections)
+- Agent D done → append `SOURCE: [Slack]` block
+- Agent E done → append `SOURCE: [Claude Code artifacts]` block
+
+**Store variables as agents complete:**
+- `CALENDAR_DATA` ← Agent A
+- `GMAIL_DATA` ← Agent B
+- `GITHUB_DATA` ← Agent C (PRs, issues, commits, board)
+- `SLACK_DATA` ← Agent D
+- `ARTIFACT_DATA` ← Agent E
+
+If any agent returns empty or errors, write `(agent returned no data)` in its data.txt block and note it in the Sources header of the final log.
+
+Proceed to Step 11 (conversation history). Step 10 runs only if Step 14 later identifies a thin weekday — do not run it here.
+
+---
+
 ### Step 10: On-Demand Only Sources
 
-Both sub-steps below are skipped during normal routine. They are only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
+Both sub-steps below are skipped during normal routine. They are only queried after Step 14 identifies a weekday with < 5.0h of logged activity. See the trigger at the end of Step 14.
 
 ---
 
 #### Step 10a: Fetch Chrome Browsing History
 
-**Skip this step during normal routine.** Chrome history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
+**Skip this step during normal routine.** Chrome history is only queried after Step 14 identifies a weekday with < 5.0h of logged activity.
 
 When invoked for a specific `TARGET_DAY` (e.g. "2026-06-03"):
 
@@ -736,7 +860,7 @@ From results, create `[Training/Learning]` entries for video/course/reading acti
 
 #### Step 10b: Fetch Cursor IDE Edit Activity
 
-**Skip this step during normal routine.** Cursor edit history is only queried after Step 14 (Balance Daily Hours) identifies a day with < 6.5h of logged activity. See the trigger at the end of Step 14.
+**Skip this step during normal routine.** Cursor edit history is only queried after Step 14 identifies a weekday with < 5.0h of logged activity.
 
 When invoked for a specific `TARGET_DAY` (e.g. "2026-06-05"):
 
@@ -823,6 +947,23 @@ Add these as supplementary entries. These are authoritative — prefer them over
 
 ---
 
+### Step 11.5: Append Conversation History to data.txt
+
+By Step 9.9 all five agent source blocks have been appended to `data.txt`. Manual daily entries are already present in `data.txt` (written there by daily mode). Now append only the conversation-mined items from Step 11:
+
+```
+===========================================================================
+SOURCE: [Conversation history]
+===========================================================================
+
+--- YYYY-MM-DD ---
+<items mined from Step 11 not already captured by other sources, or "(none)">
+```
+
+`data.txt` is now complete. Proceed to synthesis.
+
+---
+
 ### Step 12: Classify Each Item
 
 Apply these rules in order:
@@ -834,10 +975,7 @@ Apply these rules in order:
 | GitHub PR reviewed (not authored) | `[Code Review]` | `Reviewed following PR: <url>` |
 | GitHub issue with user's comments | `[R&D]` | `Study the code and brainstorm the solution for this story: <url>` (adapt phrasing to issue title) |
 | GitHub project board issue (assigned, no PR) | `[R&D]` | `Investigated and explored solution for: <issue_url>` |
-| Google Calendar meeting (standup) | `[Meeting]` | `Axim Daily Syncup` |
-| Google Calendar meeting (grooming) | `[Meeting]` | `Team Grooming Session` |
-| Google Calendar meeting (weekly sync) | `[Meeting]` | `Weekly Aximprovements team sync up meeting with Client` |
-| Google Calendar meeting (other) | `[Meeting]` | `<calendar event title>` |
+| Google Calendar meeting | `[Meeting]` | Use ERP description from Step 3's recurring-meeting table; for unlisted events use the calendar event title |
 | Slack daily standup post (no calendar duplicate) | `[Meeting]` | `Axim Daily Syncup` |
 | Slack grooming thread/post | `[Backlog grooming]` | `Team Grooming Session` |
 | Slack weekly sync post | `[Meeting]` | `Weekly Aximprovements team sync up meeting with Client` |
@@ -864,7 +1002,7 @@ Apply these rules in order:
 **PKT day assignment:**
 1. Convert all UTC timestamps to PKT (+5h) before assigning to a weekday.
 2. If Chrome history shows the user visited the PR on a specific day, prefer that day.
-3. If a PR spans multiple days (created Monday, merged Wednesday), assign the primary coding entry to the merge/last-active day, and optionally split a second entry to an earlier day if hours would exceed the daily cap.
+3. If a PR spans multiple days (created Monday, merged Wednesday), assign the primary coding entry to the merge/last-active day, and optionally split a second entry to an earlier day if commits clearly show work happened on both days.
 
 ---
 
@@ -898,50 +1036,49 @@ For items already in `ACCUMULATED_ENTRIES`, use the hours from those entries —
 
 ---
 
-### Step 14: Balance Daily Hours
+### Step 14: Assign Hours and Days
 
-Target: **~8h/day**, max 9.0h, min 6.5h.
+**No daily cap or floor.** Log what was actually worked — 10–11h days are valid and should not be split or redistributed. The goal is accuracy, not hitting a target.
 
-1. Sum hours per PKT weekday — include `ERP_ENTRIES`, `ACCUMULATED_ENTRIES`, and new entries.
-2. If a day exceeds 9.0h: move the lowest-priority `[Coding]` or `[R&D]` entry to the lightest adjacent weekday (keep `[Meeting]` and `[Code Review]` in place). Do NOT move ERP or accumulated entries.
-3. If a day is below 6.5h and there are unassigned GitHub issues or Slack R&D threads, redistribute them here.
-4. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every weekday where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event or existing entry already covers it.
-5. If a weekday has zero signal across all sources, leave it **blank** in the output and add a note: `(no activity detected — leave or holiday?)`.
+1. Sum hours per PKT day — include `ERP_ENTRIES`, `ACCUMULATED_ENTRIES`, and new entries. **Default scope: Mon–Fri only.** Sat/Sun are included only if the user explicitly asked for weekend logs in their invocation.
+2. Always include `[Meeting] - Axim Daily Syncup (0.50)` for every **weekday** where there is any other activity (standup is a daily constant unless the user is on leave). Skip if a calendar standup event or existing entry already covers it.
+3. If a weekday has zero signal across all sources, leave it **blank** in the output and add a note: `(no activity detected — leave or holiday?)`.
 
-**After balancing — on-demand supplemental sources trigger:**
-For every weekday that still has < 6.5h total after steps 1–4 above, ask the user before proceeding to Step 15:
+**On-demand supplemental sources trigger:**
+For any weekday with < 5.0h logged and no obvious reason (no leave, no public holiday), ask the user:
 
-> "The following days look thin after pulling all sources:
+> "The following days look light after pulling all sources:
 > - **YYYY-MM-DD (Day)** — X.Xh logged
-> Would you like me to check supplemental sources for these days?
-> - **Chrome history** — surfaces YouTube, online courses, docs reading sessions
-> - **Cursor IDE edits** — surfaces coding sessions not reflected in GitHub PRs yet
-> (both / chrome / cursor / n / skip <day>)"
+> Would you like me to check supplemental sources?
+> - **Chrome history** — YouTube, courses, docs reading sessions
+> - **Cursor IDE edits** — coding sessions not yet in GitHub
+> (both / chrome / cursor / skip)"
 
-If the user confirms:
-- `chrome` or `both` → run Step 10a for each confirmed day, add any `[Training/Learning]` entries found
-- `cursor` or `both` → run Step 10b for each confirmed day, add any `[Coding]` entries found
-
-Re-balance after adding entries, then continue to Step 15. If no, skip both steps and proceed.
+If confirmed, run Step 10a/10b for those days and add any entries found. Then continue to Step 15.
 
 ---
 
 ### Step 15: Render the Output
 
-**Model override:** This is the synthesis step — spawn an `Agent` subagent with `model: "opus"` and pass it all collected data (GitHub results, Calendar events, Slack signals, Chrome history, ARTIFACT_ENTRIES, ERP_ENTRIES, ACCUMULATED_ENTRIES, conversation notes) as context. The Opus subagent applies Steps 12–14 classification/balancing rules and produces the final formatted log below. Return the rendered log back to the main skill context.
+**Steps 12–14 run in the main skill context** (they involve data manipulation and, in Step 14, an interactive user prompt for thin days). Once classification, hour estimation, and day assignment are complete, spawn an `Agent` subagent with `model: "opus"` for final formatting. Pass it: the fully classified entry list, `ERP_ENTRIES`, `ACCUMULATED_ENTRIES`, `ARTIFACT_DATA` (for rich descriptions), and any conversation notes. The Opus subagent applies the description-style rules below and renders the formatted log. Return the result back to the main context.
 
 > **Reminder — entry length limit:** Every entry description must be **≤ 490 characters**. Truncate before writing.
 
-> **Description style — use short natural half-sentences, not formal complete sentences.**
-> Prefer: `"did manual testing; added console logs to 9 files"` over `"Tested Remove Legacy UI Waffle Flags on local OpenEdX dev env verifying Phase 1a routes."`
-> Pattern: `"did X; worked on Y; resolved Z"` — fragments joined by semicolons are fine. Avoid subject-verb-object formality.
+> **Description style — rich, specific, context-loaded. Use the artifact summaries to make entries informative:**
+> - Prefer: `"debugged flaky XBlock serialisation test; narrowed to a race condition in course export; added console logs to 9 files"` over `"Worked on following PR: https://..."`
+> - Lead with what was actually done, then add the PR/issue URL as supporting reference
+> - Pattern: `"did X; worked on Y; resolved Z — <url>"` — fragments joined by semicolons are fine
+> - For multi-day PRs, the description should reflect what specifically happened *that day* (wrote tests, addressed review, fixed merge conflict) not just "worked on PR"
+> - Avoid subject-verb-object formality; short natural phrases preferred
+
+**Default scope — Mon through Fri.** Only include Sat/Sun sections if the user explicitly requested weekend logs in their invocation.
 
 Format the log exactly as:
 
 ```
 Week: YYYY-MM-DD .. YYYY-MM-DD
-Sources: GitHub (openedx) | Google Calendar | Gmail (sent) | Slack (#aximprovements) | Chrome history | Cursor IDE history | GitHub board (openedx/projects/55) | Claude artifacts | Accumulated daily entries | Conversation history
-GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Gmail: E threads  |  Slack: M messages  |  Board: K items  |  Artifacts: A items  |  Daily entries: D accumulated
+Sources: GitHub (openedx) | Google Calendar | Gmail (sent) | Slack (#axim-aximprovements-internal) | Chrome history | Cursor IDE history | GitHub board (openedx/projects/55) | Claude artifacts | Manual daily entries | Conversation history
+GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Gmail: E threads  |  Slack: M messages  |  Board: K items  |  Artifacts: A items  |  Daily entries: D manual
 
 --- YYYY-MM-DD (Mon) | X.Xh ---
 [Tag] - Description (X.X)
@@ -963,19 +1100,23 @@ GitHub: X authored, Y reviewed, Z issues  |  Calendar: N events  |  Gmail: E thr
 Weekly total: XX.Xh
 ```
 
+If weekend logs were explicitly requested, append:
+```
+--- YYYY-MM-DD (Sat) | X.Xh ---
+...
+
+--- YYYY-MM-DD (Sun) | X.Xh ---
+...
+```
+
 Entry ordering within each day:
 1. `ERP_ENTRIES` (already in ERP — listed first)
-2. `ACCUMULATED_ENTRIES` for that date (daily mode entries)
+2. `ACCUMULATED_ENTRIES` for that date (manual daily entries)
 3. New entries generated from connectors this session
 
 ---
 
 ### Step 16: Write the Log File
-
-Create the directory if it doesn't exist:
-```bash
-mkdir -p "<LOG_DIR>"
-```
 
 Write the rendered output to:
 ```
@@ -1015,7 +1156,7 @@ Never add a date suffix — one file per week directory, overwrite each time.
 **CRITICAL — ENTRIES must include all three sources:**
 The PATCH request replaces all tasks for the project. Therefore the ENTRIES array must contain:
 1. All entries from `ERP_ENTRIES` (Step 2) — converted to ENTRIES format, preserving their original date, labelId, hours, and description exactly
-2. All entries from `ACCUMULATED_ENTRIES` (Step 2.5) — that are NOT already covered by ERP_ENTRIES
+2. All entries from `ACCUMULATED_ENTRIES` (Manual daily entries, Step 2.5) — that are NOT already covered by ERP_ENTRIES
 3. All new entries generated in this session — only those NOT already covered by ERP_ENTRIES or ACCUMULATED_ENTRIES
 
 For existing entries where `label_option` was null, infer the labelId from the description as described in Step 2.
@@ -1024,9 +1165,9 @@ For existing entries where `label_option` was null, infer the labelId from the d
 - Use `var` and regular `function` (no arrow functions on critical lines) — maximises compatibility
 - Use double quotes `"` for all strings — single quotes are more prone to curly-quote substitution
 - Hardcode `labelId` numbers directly in each entry object (do NOT use a `LABEL_IDS` lookup object with `"Code Review"` as a key — long object keys are where wrapping breaks)
-- Label IDs: Meeting=37, R&D=44, Code Review=35, Coding=34, Testing=39, Debugging=40, Documentation=42, Deployment=60
+- Label IDs: Meeting=37, R&D=44, Code Review=35, Coding=34, Testing=39, Debugging=40, Documentation=42, Deployment=60, Training/Learning→R&D=44, Backlog grooming→Meeting=37
 - Hours format: decimal number (e.g. `0.5`, `1.5`, `6.5`)
-- `desc` max 120 chars — truncate PR URL lists if needed
+- `desc` max 120 chars in the JS (ERP API display limit) — the log file allows up to 490 chars; truncate when converting log entries to the ENTRIES array
 - Log ID comes from the ERP portal URL: `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`
 - The DevTools approach uses the browser's existing logged-in session via `document.cookie` — no separate auth needed
 
@@ -1037,12 +1178,12 @@ For existing entries where `label_option` was null, infer the labelId from the d
   var LOG_ID = "<LOG_ID>";
   var BASE = "https://erp.arbisoft.com";
 
-  // ENTRIES = ERP entries (preserved) + accumulated daily entries + new entries this session
-  // ERP entries are listed first within each day, then accumulated, then new
+  // ENTRIES = ERP entries (preserved) + manual daily entries + new entries this session
+  // ERP entries are listed first within each day, then manual daily, then new
   var ENTRIES = [
     // --- From ERP (preserved verbatim) ---
     { date: "YYYY-MM-DD", labelId: 37, taskType: "Meeting",     hours: 0.75, desc: "Axim Sync up + Knowledge Sharing" },
-    // --- From accumulated daily entries ---
+    // --- From manual daily entries ---
     { date: "YYYY-MM-DD", labelId: 34, taskType: "Coding",      hours: 2.5,  desc: "Worked on following PR: https://..." },
     // --- New entries added this session ---
     { date: "YYYY-MM-DD", labelId: 35, taskType: "Code Review", hours: 1.5,  desc: "Reviewed following PR: https://..." },
@@ -1135,7 +1276,7 @@ Each percentage is `round(label_hours / total_hours × 100)`. Show buckets with 
 
 **Top 3 activities:** the three highest-`hours` individual entries from ENTRIES. Truncate description to ~60 chars; show the PKT weekday short name (Mon/Tue/Wed/Thu/Fri).
 
-**Delta computation:** `Δ = total - 40`. If positive, render as `+X.Xh`; if negative, `-X.Xh`.
+**Delta computation:** `Δ = total - 40` (Mon–Fri base). If positive, render as `+X.Xh`; if negative, `-X.Xh`. If weekend days were included, note that in the delta line.
 
 **Format (print exactly as below, with the box-drawing lines):**
 
@@ -1188,5 +1329,3 @@ Keep this summary short — it is a quick health-check for the user before they 
 ```
 
 The ERP URL is optional for log generation but required for the DevTools JS script (Step 18). Always extract the LOG_ID from it when provided.
-
-After Step 18 writes the DevTools script, Step 19 prints a concise weekly summary in the chat (total hours, breakdown by label, breakdown by day, and top 3 activities) so the user can sanity-check the log before pasting the DevTools script.

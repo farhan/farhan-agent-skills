@@ -10,6 +10,20 @@ If no argument is provided, use the default subject: `chore: Upgrade Python requ
 
 ---
 
+## Step 0 — Set Terminal to Green
+
+Before doing anything else, run this to turn the Terminal green so the session is visually identifiable:
+
+```bash
+osascript -e 'tell application "Terminal" to set current settings of front window to settings set "Homebrew"' 2>/dev/null || \
+osascript -e 'tell application "Terminal"
+  set theWindow to front window
+  set background color of theWindow to {0, 32000, 0, 65535}
+end tell' 2>/dev/null || true
+```
+
+---
+
 ## Step 1 — Fetch Emails
 
 Determine the date range for the current week:
@@ -31,106 +45,118 @@ If no emails are found, stop and inform the user.
 
 ---
 
-## Step 2 — Check CI, Auto-Fix Quality Failures & Approve
+## Step 2 — Check CI & Approve Green PRs
 
-For each PR URL found in the emails, run:
+For each PR URL found in the emails, run **in parallel**:
 ```
 gh pr checks <url>
 ```
 
 Categorize each PR:
 - **Green** — all checks passed, or the only failing check is `codecov/project`
-- **Quality Fix Applied** — the only non-`codecov/project` failing check is a quality/mypy/lint check — auto-fix and push (see below)
-- **Failing** — one or more checks failed (excluding `codecov/project` and quality checks that were auto-fixed)
+- **Failing** — one or more checks failed (excluding `codecov/project`)
 - **Pending** — checks still running
 
 > Note: `codecov/project` failures do not block merging — treat a PR as Green if it is the only failing check.
 
-### Auto-fixing quality check failures (no user approval needed)
-
-If a PR's only failing check is a quality check (e.g. `quality`, `mypy`, `pylint`, `lint`):
-
-1. Fetch the failing job logs:
-   ```
-   gh run view <run_id> --job <job_id> --log --repo <owner>/<repo>
-   ```
-2. Clone or update the PR branch into the dedicated workspace at `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes/`:
-   ```
-   WORKSPACE=/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes/<repo>
-
-   if [ -d "$WORKSPACE" ]; then
-     # Already cloned — fetch and switch to the PR branch
-     cd "$WORKSPACE"
-     git fetch origin <branch>
-     git checkout <branch>
-     git pull origin <branch>
-   else
-     # Fresh clone into the dedicated workspace
-     mkdir -p /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes
-     git clone --depth 1 --branch <branch> https://github.com/<owner>/<repo>.git "$WORKSPACE"
-   fi
-   ```
-3. Create a virtual environment inside the cloned repo (if it doesn't already exist) and install dependencies:
-   ```
-   cd /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes/<repo>
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements/quality.txt
-   .venv/bin/pip install -e .
-   ```
-4. Read the failing files identified in the logs and apply the minimal fix (e.g. use `cast()` from `typing`, add `# type: ignore[misc]`, annotate a variable type, fix a lint rule).
-5. **Verify the fix locally before pushing** — run mypy and pylint on the changed files:
-   ```
-   .venv/bin/mypy --show-traceback 2>&1 | grep -E "error:|Found|Success"
-   .venv/bin/pylint <changed_file1> <changed_file2> 2>&1; echo "exit: $?"
-   ```
-   Only proceed to push if mypy reports `Success` and pylint exits 0.
-6. Commit and push directly to the PR branch — **no user confirmation required**:
-   ```
-   git commit -m "fix: resolve quality check failures from upgraded dependencies"
-   git push origin <branch>
-   ```
-7. Mark the PR as **Quality Fix Applied** in the status table.
-
-For every PR that is Green or had a Quality Fix Applied (including those where only `codecov/project` fails), approve it:
+For every **Green** PR, immediately approve it (no user confirmation needed):
 ```
 gh pr review <url> --approve
 ```
 
-### Here's the full status table:
+### Status table:
 
-| Repo | PR # | Checks | Quality Fix | Approved |
-|---|---|---|---|---|
+| Repo | PR # | Checks | Approved |
+|---|---|---|---|
 
 ---
 
-## Step 3 — Offer to Open in Chrome
+## Step 3 — Spawn Parallel Fix Agents for All Failing PRs
+
+For every PR categorised as **Failing**, immediately spawn a background Agent — **no user approval needed, no questions asked**. Launch all agents in a single message so they run in parallel.
+
+Each agent receives this prompt (fill in the specifics per PR):
+
+---
+```
+You are fixing CI failures on an OpenEdX upgrade PR. Diagnose, fix, verify locally, commit, and push — no user confirmation needed at any step.
+
+PR: <url>
+Repo: <owner>/<repo>
+Failing checks (with job URLs):
+  - <check name>: <job url>
+  ...
+
+Workspace: /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes/
+
+## Instructions
+
+### 1. Get PR branch
+  gh pr view <url> --json headRefName,headRepository
+
+### 2. Clone or update workspace
+  WORKSPACE=/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes/<repo>
+  if [ -d "$WORKSPACE" ]; then
+    cd "$WORKSPACE" && git fetch origin <branch> && git checkout <branch> && git pull origin <branch>
+  else
+    mkdir -p /Users/farhan.khan/MyStuff/Development/Claude_Workspaces/axim-pr-fixes
+    git clone --depth 1 --branch <branch> https://github.com/<owner>/<repo>.git "$WORKSPACE"
+  fi
+
+### 3. Fetch failing CI logs for every failing job
+  gh run view <run_id> --job <job_id> --log --repo <owner>/<repo> 2>&1 | tail -100
+
+### 4. Set up environment and reproduce the failure
+  Check tox.ini / .github/workflows/ for the exact test/quality commands.
+  Create a venv if needed and install deps from requirements/test.txt or
+  requirements/quality.txt or via uv sync --group test.
+
+### 5. Fix the issue
+  Apply the minimal targeted fix. Do NOT rewrite tests or add broad changes.
+
+### 6. Verify locally — all failing checks must pass before pushing.
+
+### 7. Commit and push (no confirmation needed)
+  git add <changed files>
+  git commit -m "fix: resolve CI failures from upgraded dependencies"
+  git push origin <branch>
+
+### 8. Report back
+  Short summary: what was failing, what you changed, local tests pass, push succeeded.
+```
+---
+
+After spawning all agents, continue immediately to Step 4 — do NOT wait for agents to finish.
+
+---
+
+## Step 4 — Ask to Open PRs in Chrome
 
 Ask the user:
 > "Would you like me to open all PRs in Chrome for review? (y/n)"
 
-If yes, run:
+**Stop here and wait for the user to respond.**
+
+If yes, open **all PRs** (green + failing) in a **new** Chrome window:
 ```
-open -a "Google Chrome" <url1> <url2> ...
+open -na "Google Chrome" --args --new-window <url1> <url2> ...
 ```
 
-Open **all PRs** — both approved (green checks) and those with failing or pending checks.
-
-Then say:
-> "PRs are open in Chrome. Review them and come back when you're ready to merge."
+Immediately after opening, ask:
+> "Do you want me to merge all the PRs that have green checks and are approved?"
 
 **Stop here and wait for the user to respond.**
 
 ---
 
-## Step 4 — Merge
+## Step 5 — Merge
 
-When the user returns and is ready to merge, ask:
-> "Ready to merge? I'll squash-merge all approved PRs with green checks. Proceed? (y/n)"
-
-If yes, for each approved PR run:
+If the user says yes, for each approved PR with green checks run:
 ```
 gh pr merge <url> --squash --auto
 ```
+
+If a repo does not support squash merges, fall back to `--merge --auto`.
 
 After attempting all merges, verify each PR's state:
 ```
@@ -143,13 +169,13 @@ Build two lists:
 
 ---
 
-## Step 5 — Mark Emails Read
+## Step 6 — Mark Emails Read
 
 For every PR that was successfully merged, find its corresponding email thread and mark it as read by removing the UNREAD label using the Gmail MCP tool.
 
 ---
 
-## Step 6 — Summary
+## Step 7 — Summary
 
 Present a final summary:
 
@@ -159,7 +185,7 @@ Present a final summary:
 **Merged ✓**
 - `openedx/<repo>` PR #XX — merged at <time>
 
-**Quality Fix Applied & Merged ✓**
+**Fix Applied & Merged ✓**
 - `openedx/<repo>` PR #XX — fixed: <description of fix> — merged at <time>
 
 **Not Merged (auto-merge enabled)**
