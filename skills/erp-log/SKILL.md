@@ -974,8 +974,8 @@ Apply these rules in order:
 
 | Signal | Tag | Description template |
 |---|---|---|
-| GitHub PR authored, active this week | `[Coding]` | `Worked on following PR: <url>` — enrich with what the PR does if commits/body clarify it |
-| GitHub PR authored, multiple PRs for same story/issue | `[Coding]` | Group them: `Worked on following PR's\n<url1>\n<url2>` |
+| GitHub PR authored, active this week | `[Coding]` | `Worked on the PR <repo>#<N> related to <point 1>, <point 2>, and <point 3>` — name the 3 main things the PR addresses; add outcome/context after a semicolon |
+| GitHub PR authored, multiple PRs for same story/issue | `[Coding]` | One entry per PR, each using the `"Worked on the PR <repo>#<N> related to ..."` pattern |
 | GitHub PR reviewed (not authored) | `[Code Review]` | `Reviewed following PR: <url>` |
 | GitHub issue with user's comments | `[R&D]` | `Study the code and brainstorm the solution for this story: <url>` (adapt phrasing to issue title) |
 | GitHub project board issue (assigned, no PR) | `[R&D]` | `Investigated and explored solution for: <issue_url>` |
