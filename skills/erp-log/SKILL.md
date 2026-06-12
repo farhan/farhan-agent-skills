@@ -1076,6 +1076,7 @@ If confirmed, run Step 10a/10b for those days and add any entries found. Then co
 
 > **Description style — rich, specific, context-loaded. Match GitHub activity with Claude Code artifact prompts to surface what was actually done:**
 > - Prefer: `"XBlock#917 — fold web_fragments: ran uv sync, verified web_fragments.__file__ resolves to local package; flagged missing subpackage declarations and broken test discovery; CHANGES_REQUESTED"` over `"Reviewed following PR: https://..."`
+> - For authored PRs: use the pattern `"Worked on the PR <repo>#<N> related to <point 1>, <point 2>, and <point 3>"` — name the 3 main things the PR addresses, then add outcome/context after the semicolon
 > - Lead with what was actually done (test commands run, findings, decisions made, specific files touched), then add the PR/issue reference
 > - Pattern: `"did X; ran Y; found Z; decided W"` — fragments joined by semicolons are fine; no need for full sentences
 > - Cross-reference the Claude artifact prompts with GitHub activity to reconstruct the actual steps — if prompts mention merge conflicts in specific files, name them; if they mention running a test suite, name the command
