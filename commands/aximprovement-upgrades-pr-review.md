@@ -10,20 +10,6 @@ If no argument is provided, use the default subject: `chore: Upgrade Python requ
 
 ---
 
-## Step 0 — Set Terminal to Green
-
-Before doing anything else, run this to turn the Terminal green so the session is visually identifiable:
-
-```bash
-osascript -e 'tell application "Terminal" to set current settings of front window to settings set "Homebrew"' 2>/dev/null || \
-osascript -e 'tell application "Terminal"
-  set theWindow to front window
-  set background color of theWindow to {0, 32000, 0, 65535}
-end tell' 2>/dev/null || true
-```
-
----
-
 ## Step 1 — Fetch Emails
 
 Determine the date range for the current week:
@@ -37,9 +23,9 @@ Search Gmail using the Gmail MCP tool with a query like:
 
 where `after` is the Tuesday start date and `before` is the day after Monday (to make the range inclusive).
 
-List the found email threads in a clean table:
-| Repo | PR # | PR URL | Packages Flagged |
-|---|---|---|---|
+List the found email threads in a clean table. **Always start with a serial-number column (`S.No`) as the first column, and include a `Major Upgrades` column** listing any packages flagged for manual review / major version bumps (the bot marks these `[MAJOR]`; write `—` if none):
+| S.No | Repo | PR # | PR URL | Packages Flagged | Major Upgrades |
+|---|---|---|---|---|---|
 
 If no emails are found, stop and inform the user.
 
@@ -66,8 +52,10 @@ gh pr review <url> --approve
 
 ### Status table:
 
-| Repo | PR # | Checks | Approved |
-|---|---|---|---|
+**Always start with a serial-number column (`S.No`) as the first column, and include a `Major Upgrades` column** (same `[MAJOR]` packages as Step 1; `—` if none):
+
+| S.No | Repo | PR # | Checks | Approved | Major Upgrades |
+|---|---|---|---|---|---|
 
 ---
 
