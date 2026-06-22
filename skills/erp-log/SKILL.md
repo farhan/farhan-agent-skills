@@ -1041,6 +1041,8 @@ Apply these rules in order:
 
 Round all hours to the nearest 0.1h. If the user explicitly stated hours anywhere (in the conversation, in an `ACCUMULATED_ENTRIES` line, or in a Slack message), use those instead.
 
+> **Split rule — entries > 4.0h:** If a single PR (authored or reviewed) totals more than 4.0h, always split it into **two entries** on the same date with the same PR URL. Do NOT label them with round/part numbers — just write two plain entries with different descriptions. Divide hours evenly (round to nearest 0.5h). Each entry describes **different steps**: first entry covers initial work (first read, checkout, running tests, filing first review); second covers follow-up (addressing re-review, resolving comments, approving/merging, post-merge follow-ups). Never write a single entry exceeding 4.0h.
+
 For items already in `ERP_ENTRIES`, use the hours already recorded there — do not re-estimate.
 For items already in `ACCUMULATED_ENTRIES`, use the hours from those entries — do not re-estimate.
 
