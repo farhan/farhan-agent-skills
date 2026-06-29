@@ -1,8 +1,8 @@
 ---
 name: erp-log
-description: Generate Arbisoft ERP project log for a given week (w/weekly) or append a quick daily entry (d/daily). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with manual daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", or similar.
-version: 3.6.0
-model: sonnet
+description: Generate Arbisoft ERP project log for a given week (w/weekly), append a quick daily entry (d/daily), or summarize the current conversation session into a log entry (s/session TIME). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with manual daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Session mode reads the current conversation, synthesizes a concise task description from what was accomplished, and logs it with the given time. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", "erp-log session 1h", or similar.
+version: 3.7.0
+model: haiku
 allowed-tools: Agent, Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
 
@@ -42,12 +42,15 @@ If a connector is unavailable, skip its step and note it in the Sources header o
 
 **Syntax:**
 ```
-/erp-log [d|daily|w|weekly] [ERP_URL] [--week YYYY-MM-DD] [free-form content]
+/erp-log [d|daily|w|weekly|s|session TIME] [ERP_URL] [--week YYYY-MM-DD] [free-form content]
 ```
 
 Parse the first argument (case-insensitive):
 - `w` or `weekly` → **Weekly Mode** — go to [Weekly Mode](#weekly-mode) section below
+- `s` or `session` → **Session Mode** (FAST PATH) — the next token is the TIME; go immediately to [Session Mode](#session-mode), do NOT run any other steps first
 - `d` or `daily`, or **no mode argument given** → **Daily Mode** — go to [Daily Mode](#daily-mode) section below
+
+> **Session Mode shorthand:** `erp-log s 1h`, `erp-log s 30m`, `erp-log session 2.5h` all trigger Session Mode. No ERP URL needed. No external data fetching. Completes in 1–2 turns.
 
 **Directory naming (used in both modes):**
 
@@ -79,6 +82,82 @@ Files per directory:
 - `data.txt` — all entries and raw data: manual daily entries (appended by daily mode) + raw source dumps from each parallel agent (appended during weekly run)
 - `erp_log.txt` — final synthesized log, written once per weekly run (Step 16); clean and submission-ready
 - `devtools_fill_log_js.txt` — ready-to-paste DevTools submission script (`.txt` prevents smart-quote mangling when copying from editors)
+
+---
+
+## SESSION MODE
+
+> **FAST PATH — no external calls, no agents, no data fetching.** This mode reads only the current conversation. It must complete in 1–2 model turns. Never call GitHub, Calendar, Slack, Gmail, or Chrome history in this mode.
+
+Session mode synthesizes what was accomplished in the **current conversation** into a single ERP log entry and appends it — no manual description needed.
+
+### Step S1: Parse Time
+
+Extract the time from the token immediately after `s` / `session`. Accept any of:
+- `1h`, `1.5h`, `2h`, `0.5h`, etc. → decimal hours directly
+- `30m`, `45m`, `90m` → divide by 60
+- `1 hour`, `2 hours`, `30 min`, `45 minutes` → convert to decimal
+- Bare number like `1` or `2` → treat as hours
+
+If no time token is present or recognizable, ask **once**: "How long was this session? (e.g. `1h`, `30m`)" — then proceed immediately with the answer.
+
+### Step S2: Summarize the Session
+
+Read the full current conversation (everything visible in context) and synthesize a concise ERP-ready task description:
+
+- Focus on **what was accomplished**, not how the conversation unfolded — omit back-and-forth, clarifications, and tool calls
+- Name specific artifacts: PR numbers, repo names, issue URLs, files changed, commands run, decisions made
+- Write in the same terse technical style as other ERP entries: fragments joined by semicolons are fine
+- **≤ 490 characters**
+- Infer the tag from the dominant activity:
+
+| Dominant activity in session | Tag |
+|---|---|
+| PRs reviewed, CI checked, approved, merged | `[Code Review]` |
+| Code written, implemented, committed, pushed | `[Coding]` |
+| Bug investigated, root cause found, fix applied | `[Debugging]` |
+| Meetings, syncs, standups discussed | `[Meeting]` |
+| Research, design, investigation, no code yet | `[R&D]` |
+| Docs, tests written | `[Documentation]` / `[Testing]` |
+| Watched, read, learned | `[Training/Learning]` |
+
+If the session clearly contains **multiple distinct tasks** (e.g. a PR review AND a standup), split into one entry per task, dividing the total time proportionally (round each to nearest 0.1h, make them sum to the stated total).
+
+### Step S3: Write to Log File
+
+Use today's PKT date (UTC+5) as `TARGET_DATE`. Compute week directory:
+- `WEEK_START` = Monday of the week containing `TARGET_DATE`
+- `WEEK_END_SUN` = `WEEK_START + 6 days`
+- `WEEK_DIR` = `Mon, {MMM DD} to Sun, {MMM DD}` (zero-padded day, e.g. `Mon, Jun 23 to Sun, Jun 29`)
+- `LOG_DIR` = `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>`
+
+Create directory and file if needed:
+```bash
+mkdir -p "<LOG_DIR>"
+```
+
+If `data.txt` does not exist, create it with header:
+```
+Week: WEEK_START .. WEEK_END_FRI
+--- Manual daily entries ---
+```
+
+Append entry as one line:
+```
+TARGET_DATE [TAG] - Description (hours)
+```
+
+Example: `2026-06-29 [Coding] - Updated erp-log skill session mode for faster routing (1.0)`
+
+Hours format: bare decimal, no `h` suffix.
+
+### Step S4: Confirm to User
+
+Show what was added — **no further prompts**:
+> "Added to `logs/<WEEK_DIR>/data.txt`:"
+> `2026-06-29 [Tag] - Description (X.X)`
+
+Done.
 
 ---
 
@@ -228,7 +307,7 @@ Share the following snippet with the user and ask them to paste the output:
 > "Before I start, please paste this into your Chrome DevTools Console on `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/` and share the output:"
 >
 > ```javascript
-> fetch('/api/v1/project-logs/person/get/<LOG_ID>/', {headers:{Accept:'application/json'},credentials:'include'}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d)))
+> fetch('/api/v1/project-logs/person/get/<LOG_ID>/',{headers:{'Accept':'application/json'},credentials:'include'}).then(r=>r.json()).then(d=>prompt('Cmd+A then Cmd+C to copy:',JSON.stringify(d))).catch(e=>alert('Error: '+e))
 > ```
 
 Wait for the user to paste the JSON response before proceeding.
