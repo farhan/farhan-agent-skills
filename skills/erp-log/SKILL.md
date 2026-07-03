@@ -18,6 +18,8 @@ Generate a weekly Arbisoft ERP project log, or append a quick daily entry to the
 
 > **erp_log.txt may use newlines:** The human-readable log file (`erp_log.txt`) may wrap long entry descriptions across multiple lines using indented continuation lines for readability. The `desc` field in `devtools_fill_log_js.txt` must stay a single-line string.
 
+> **Readable descriptions (all entries, all steps):** Every description must be easily human-readable — short complete (or at least half) sentences, never dense fragments crammed with `&`, `vs`, `+`, or semicolon-chained abbreviations. In `erp_log.txt`, multi-point entries use bullet points (`•`) on indented continuation lines. In the DevTools `desc` field (single-line, ≤120 chars), use 1–2 plain short sentences. Example — write `"Deep dive into the Markdown editor feature for story #3114. Verified feature claims against the original PRs."` NOT `"Deep-dive useReactMarkdownEditor #3114: verified one-way-switch & Markdown-native claims vs PRs #1805, platform#36872"`.
+
 ---
 
 ## Required Connectors
@@ -107,7 +109,7 @@ Read the full current conversation (everything visible in context) and synthesiz
 
 - Focus on **what was accomplished**, not how the conversation unfolded — omit back-and-forth, clarifications, and tool calls
 - Name specific artifacts: PR numbers, repo names, issue URLs, files changed, commands run, decisions made
-- Write in the same terse technical style as other ERP entries: fragments joined by semicolons are fine
+- Write in short, readable sentences (see the "Readable descriptions" note above) — no dense semicolon-chained fragments
 - **≤ 490 characters**
 - Infer the tag from the dominant activity:
 
@@ -1155,16 +1157,21 @@ If confirmed, run Step 10a/10b for those days and add any entries found. Then co
 
 > **Reminder — entry length limit:** Every entry description must be **≤ 490 characters**. Truncate before writing.
 
-> **Description style — rich, specific, context-loaded. Match GitHub activity with Claude Code artifact prompts to surface what was actually done:**
-> - Prefer: `"XBlock#917 — fold web_fragments: ran uv sync, verified web_fragments.__file__ resolves to local package; flagged missing subpackage declarations and broken test discovery; CHANGES_REQUESTED"` over `"Reviewed following PR: https://..."`
-> - For authored PRs: use the pattern `"Worked on the PR <repo>#<N> related to <point 1>, <point 2>, and <point 3>"` — name the 3 main things the PR addresses, then add outcome/context after the semicolon
-> - Lead with what was actually done (test commands run, findings, decisions made, specific files touched), then add the PR/issue reference
-> - Pattern: `"did X; ran Y; found Z; decided W"` — fragments joined by semicolons are fine; no need for full sentences
-> - Cross-reference the Claude artifact prompts with GitHub activity to reconstruct the actual steps — if prompts mention merge conflicts in specific files, name them; if they mention running a test suite, name the command
-> - For multi-day PRs, describe what specifically happened *that day* (wrote tests, addressed review round 2, resolved conflict in File.tsx) not just "worked on PR"
-> - For code reviews, name what was checked: specific flags found, test environments run (tox -e django42), Tutor mount test, etc.
-> - **Never include LOC/file-count stats** like `(+790/-24, 21 files)` — describe the purpose and findings instead
-> - Avoid subject-verb-object formality; short natural technical phrases preferred
+> **Description style — rich, specific, AND human-readable. Match GitHub activity with Claude Code artifact prompts to surface what was actually done, then write it as short plain sentences:**
+> - Write short complete (or at least half) sentences. NEVER dense fragments crammed with `&`, `vs`, `+`, or semicolon-chained abbreviations.
+> - In `erp_log.txt`, use bullet points (`•`) on indented continuation lines for multi-point entries. Lead line names the task and links the PR/issue; each bullet is one short sentence stating one thing done or found.
+> - Preferred `erp_log.txt` shape:
+>   ```
+>   [R&D] - Deep dive into the Markdown editor feature for story: <issue_url>
+>           • Located the editor documentation and user manual.
+>           • Verified the one-way-switch claim against the original PRs (frontend-app-authoring#1805).
+>           • Confirmed the flag is now enabled by default via a migration. (3.0)
+>   ```
+> - Still be rich and specific: name findings, decisions, test setups (e.g. "tested on master of openedx-platform and tutor"), and files where relevant — just say them in plain sentences.
+> - Cross-reference the Claude artifact prompts with GitHub activity to reconstruct the actual steps — if prompts mention merge conflicts in specific files, name them; if they mention running a test suite, name it.
+> - For multi-day PRs, describe what specifically happened *that day* (wrote tests, addressed review round 2) not just "worked on PR".
+> - For code reviews, say what was checked and the outcome: "Reviewed the Word Cloud removal PR line by line. Requested changes to keep needed tests."
+> - **Never include LOC/file-count stats** like `(+790/-24, 21 files)` — describe the purpose and findings instead.
 
 **Default scope — Mon through Fri.** Only include Sat/Sun sections if the user explicitly requested weekend logs in their invocation.
 
@@ -1262,7 +1269,7 @@ For existing entries where `label_option` was null, infer the labelId from the d
 - Hardcode `labelId` numbers directly in each entry object (do NOT use a `LABEL_IDS` lookup object with `"Code Review"` as a key — long object keys are where wrapping breaks)
 - Label IDs: Meeting=37, R&D=44, Code Review=35, Coding=34, Testing=39, Debugging=40, Documentation=42, Deployment=60, Training/Learning→R&D=44, Backlog grooming→Meeting=37
 - Hours format: decimal number (e.g. `0.5`, `1.5`, `6.5`)
-- `desc` max 120 chars in the JS (ERP API display limit) — the log file allows up to 490 chars; truncate when converting log entries to the ENTRIES array
+- `desc` max 120 chars in the JS (ERP API display limit) — the log file allows up to 490 chars; when converting log entries to the ENTRIES array, rewrite as 1–2 plain short sentences (do NOT compress into fragments with `&`/`vs`/abbreviations; drop secondary detail instead)
 - Log ID comes from the ERP portal URL: `https://erp.arbisoft.com/project-logs/update/<LOG_ID>/`
 - The DevTools approach uses the browser's existing logged-in session via `document.cookie` — no separate auth needed
 
