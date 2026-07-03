@@ -1,7 +1,7 @@
 ---
 name: erp-log
 description: Generate Arbisoft ERP project log for a given week (w/weekly), append a quick daily entry (d/daily), or summarize the current conversation session into a log entry (s/session TIME). Weekly mode aggregates GitHub activity (openedx org only), Google Calendar meetings, Slack activity, Chrome browsing history, and GitHub project board events, combining them with manual daily entries and existing ERP data. Daily mode parses a task description from the user's message and appends it to the ongoing weekly log file. Session mode reads the current conversation, synthesizes a concise task description from what was accomplished, and logs it with the given time. Logs are organized under logs/<Mon, MMM DD to Sun, MMM DD>/ directories. Use when the user asks to "fill ERP log", "generate weekly log", "log today's work", "add daily entry", "erp-log session 1h", or similar.
-version: 3.7.0
+version: 3.8.0
 model: haiku
 allowed-tools: Agent, Bash(gh api:*), Bash(gh auth status:*), Bash(date:*), Bash(sqlite3:*), Bash(cp:*), Bash(ls:*), Bash(mkdir:*), Bash(cat:*), Bash(python3:*), Bash(find:*), Write, Read, mcp__claude_ai_Slack__slack_search_public_and_private, mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_search_channels, mcp__claude_ai_Slack__slack_search_users, mcp__claude_ai_Google_Calendar__list_calendars, mcp__claude_ai_Google_Calendar__list_events
 ---
@@ -73,17 +73,19 @@ Where `WEEK_DIR` uses format `Mon, Jun 01 to Sun, Jun 07`:
 
 **Compute dates with bash to avoid arithmetic errors:**
 ```bash
-WEEK_START="2026-06-08"  # replace with actual Monday
-WEEK_END_FRI=$(date -j -v+4d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d" 2>/dev/null || date -d "$WEEK_START + 4 days" "+%Y-%m-%d")
-WEEK_END_SUN=$(date -j -v+6d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d" 2>/dev/null || date -d "$WEEK_START + 6 days" "+%Y-%m-%d")
-WEEK_DIR=$(date -j -f "%Y-%m-%d" "$WEEK_START" "Mon, %b %d" 2>/dev/null | sed 's/ 0/ /; s/^0//')$(echo " to ")$(date -j -f "%Y-%m-%d" "$WEEK_END_SUN" "Sun, %b %d" 2>/dev/null | sed 's/ 0/ /; s/^0//')
-echo "WEEK_DIR: $WEEK_DIR"   # verify before mkdir
+WEEK_START="2026-06-29"  # replace with actual Monday
+WEEK_END_FRI=$(date -j -v+4d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d")
+WEEK_END_SUN=$(date -j -v+6d -f "%Y-%m-%d" "$WEEK_START" "+%Y-%m-%d")
+WEEK_DIR="$(date -j -f "%Y-%m-%d" "$WEEK_START" "+Mon, %b %d") to $(date -j -f "%Y-%m-%d" "$WEEK_END_SUN" "+Sun, %b %d")"
+echo "WEEK_DIR: $WEEK_DIR"   # must be e.g. "Mon, Jun 29 to Sun, Jul 05" (zero-padded) — verify before mkdir
 ```
+Do NOT post-process the `date` output with `sed` — `%d` already gives the required zero-padded day.
 
 Files per directory:
 - `data.txt` — all entries and raw data: manual daily entries (appended by daily mode) + raw source dumps from each parallel agent (appended during weekly run)
 - `erp_log.txt` — final synthesized log, written once per weekly run (Step 16); clean and submission-ready
 - `devtools_fill_log_js.txt` — ready-to-paste DevTools submission script (`.txt` prevents smart-quote mangling when copying from editors)
+- `devtools_fill_log_js_<range>.txt` (e.g. `devtools_fill_log_js_jul01-05.txt`) — second submission script, only when ERP splits the week at a month boundary (see Step 18)
 
 ---
 
@@ -153,9 +155,11 @@ Example: `2026-06-29 [Coding] - Updated erp-log skill session mode for faster ro
 
 Hours format: bare decimal, no `h` suffix.
 
+**Verify the append landed:** `cat "<LOG_DIR>/data.txt"` and confirm the new line is actually present (a session entry was once lost silently — the weekly run had to reconstruct it from artifacts). If the line is missing, append it again before confirming.
+
 ### Step S4: Confirm to User
 
-Show what was added — **no further prompts**:
+Show what was added — **no further prompts**. Quote the line as verified on disk:
 > "Added to `logs/<WEEK_DIR>/data.txt`:"
 > `2026-06-29 [Tag] - Description (X.X)`
 
@@ -331,6 +335,12 @@ Already logged in ERP for week of <WEEK_START>:
 
 Store these as `ERP_ENTRIES` — they will be preserved verbatim in Step 18.
 
+**Month-boundary split weeks (check every time):** Read `week_starting` and `week_ending` in the response. ERP splits a week into TWO logs when it crosses a month boundary (confirmed: log 386856 = "Mon, Jun 29" to "Tue, Jun 30" only; Jul 01–05 lived in log 387598). If this log does not cover the full Mon–Sun range:
+1. Record the covered date range as `LOG_RANGE` and tell the user which days this LOG_ID covers.
+2. Generate the full week's `erp_log.txt` normally — the split only affects submission scripts.
+3. In Step 18, put only in-range entries into this log's script, then ask for the second log's URL and repeat this fetch for it before writing the second script.
+Never put entries dated outside a log's covered range into its ENTRIES array — the save endpoint computes dates from that log's `week_ending` and will mis-assign or reject them.
+
 **Deduplication note:** When generating new entries in Steps 3–13, treat both `ERP_ENTRIES` and `ACCUMULATED_ENTRIES` (Manual daily entries, Step 2.5) as already-present. Do not create a new entry for something already logged.
 
 ---
@@ -375,6 +385,14 @@ Spawn all five agents **simultaneously** using the Agent tool. Do not wait for o
 
 Each agent executes the detailed instructions for its assigned step(s) and returns **structured text grouped by PKT day**. The step instructions below (Steps 3–9) are the authoritative prompt for each agent.
 
+**Agent prompt requirements (include in all five prompts):**
+- Concrete dates only — write out `2026-06-29..2026-07-03`, never "this week" or "the target week" alone.
+- MCP-using agents (A Calendar, B Gmail, D Slack) must FIRST call ToolSearch with `select:<exact tool names>` to load their MCP tools, THEN call them. Give the exact tool names in the prompt.
+- Agents run non-interactively: they must never stop to ask the user anything — not about authentication, not to offer options. (A Slack agent once stalled an entire run by asking the user how to authenticate instead of just calling the tool.) If a tool call errors, retry once, then return `AGENT FAILED: <one-line reason>` as the final message.
+- End every prompt with: "Your final message IS the data payload — return only the formatted day-grouped text, no commentary."
+
+**Fallback:** If an agent returns `AGENT FAILED`, conversational commentary, or no usable data, do NOT respawn it. Run that step's tool calls directly in the main context (loading MCP tools via ToolSearch as needed) and build the source block yourself.
+
 After all five agents return, proceed to Step 9.9 (fan-in).
 
 ---
@@ -408,6 +426,8 @@ mcp__claude_ai_Google_Calendar__list_events
 
 Extract duration from event start/end times (round to nearest 0.25h). Calendar duration is authoritative — do NOT use Slack/heuristic estimates for meetings that have a calendar entry.
 
+**Overlapping events:** On grooming Wednesdays the calendar can contain time-overlapping events (e.g. Grooming 16:30–17:30 and Daily Syncup 17:00–17:45). Include both — calendar is authoritative — but flag the overlap in the Step 17 adjustments prompt so the user can drop one if only one actually happened.
+
 ---
 
 ### Step 4: Read Sent Gmail
@@ -417,9 +437,10 @@ Read emails **sent** during the target week to surface work context and communic
 **Search sent emails:**
 ```
 mcp__claude_ai_Gmail__search_threads
-  query: "from:farhan.khan@arbisoft.com after:WEEK_START before:WEEK_END_FRI"
+  query: "from:farhan.khan@arbisoft.com after:WEEK_START before:WEEK_END_FRI+1day"
   maxResults: 50
 ```
+(`before:` is exclusive — using `WEEK_END_FRI` itself would silently drop everything sent on Friday.)
 
 **For each thread, read the full content:**
 ```
@@ -781,9 +802,8 @@ Use `mcp__claude_ai_Slack__slack_read_channel` with channel_id `C05NRP1U0CC`, `l
 
 **IMPORTANT — Unix timestamp calculation for `oldest`/`latest`:**
 `slack_read_channel` uses Unix timestamps, not text dates. For 2026 dates:
-- 2026-05-25 00:00 UTC = `1779667200`
 - Formula: `2026-01-01 = 1767225600`; add `(days_since_jan1) × 86400`
-- Jan=31, Feb=28, Mar=31, Apr=30 → May 1 = day 121 → May 25 = day 144 → `1767225600 + 144×86400 = 1779667200`
+- Verified anchors: 2026-05-25 00:00 UTC = `1779667200` (day 144) | 2026-06-29 00:00 UTC = `1782691200` (day 179) | 2026-07-04 00:00 UTC = `1783123200`
 - Always verify by cross-checking with the text-search results' timestamps.
 
 **For threads the user participated in** that reference a PR/issue URL, optionally call:
@@ -1099,15 +1119,10 @@ Apply these rules in order:
 | PR authored, 200–600 LOC | 3.5h (+0.5 if 2+ review rounds) |
 | PR authored, >600 LOC | 4.0h (+1.0 if 2+ review rounds) |
 | PR authored, draft / not merged | 2.0h |
+| PR authored earlier, but merged/shepherded this week | 1.0–1.5h on the merge day (the authoring hours belong to the week the commits were written) |
 | PR reviewed, ≤200 LOC | 1.5h |
 | PR reviewed, 200–600 LOC | 2.0h |
 | PR reviewed, >600 LOC | 2.5h |
-
-> **Code review checkout+test overhead (always apply):** This user *always* manually checks out the reviewed branch and runs the test suite (or the PR's specific test commands) before approving. Add the following on top of the base review hours above:
-> - Small PR (≤200 LOC) or trivial fix: +0.25h
-> - Medium PR (200–600 LOC): +0.5h
-> - Large PR (>600 LOC) or complex test setup (multiple tox envs, Tutor mount, multi-phase local test): +0.75–1.0h
-> - Multi-round review (CHANGES_REQUESTED → re-review → approve): apply the overhead to each round separately.
 | Issue commented (1 comment by user) | 1.0h |
 | Issue commented (2–3 comments by user) | 2.0h |
 | Issue commented (4+ comments by user) | 3.0h |
@@ -1120,7 +1135,15 @@ Apply these rules in order:
 | Huddle / quick call (no calendar event, longer thread or code walkthrough) | 0.5h |
 | Training/Learning item | 0.5h (or as mentioned by user) |
 
+> **Code review checkout+test overhead (always apply):** This user *always* manually checks out the reviewed branch and runs the test suite (or the PR's specific test commands) before approving. Add the following on top of the base review hours above:
+> - Small PR (≤200 LOC) or trivial fix: +0.25h
+> - Medium PR (200–600 LOC): +0.5h
+> - Large PR (>600 LOC) or complex test setup (multiple tox envs, Tutor mount, multi-phase local test): +0.75–1.0h
+> - Multi-round review (CHANGES_REQUESTED → re-review → approve): apply the overhead to each round separately.
+
 Round all hours to the nearest 0.1h. If the user explicitly stated hours anywhere (in the conversation, in an `ACCUMULATED_ENTRIES` line, or in a Slack message), use those instead.
+
+> **User-stated day totals override estimates:** If the user says a day was N hours (e.g. "I worked 9 hours on Thursday"), scale that day's non-meeting entries up or down to reach N — proportionally to what the artifact/session timelines support. Do not invent new tasks to fill the gap; grow the real ones.
 
 > **Split rule — entries > 4.0h:** If a single PR (authored or reviewed) totals more than 4.0h, always split it into **two entries** on the same date with the same PR URL. Do NOT label them with round/part numbers — just write two plain entries with different descriptions. Divide hours evenly (round to nearest 0.5h). Each entry describes **different steps**: first entry covers initial work (first read, checkout, running tests, filing first review); second covers follow-up (addressing re-review, resolving comments, approving/merging, post-merge follow-ups). Never write a single entry exceeding 4.0h.
 
@@ -1251,7 +1274,11 @@ After the log file is finalised, **always** write the script to:
 
 i.e. `/Users/farhan.khan/MyStuff/Development/Claude_Workspaces/project_logs/logs/<WEEK_DIR>/devtools_fill_log_js.txt`
 
-Never add a date suffix — one file per week directory, overwrite each time.
+Never add a date suffix — one file per week directory, overwrite each time. **Exception — month-boundary split week (detected in Step 2):**
+1. `devtools_fill_log_js.txt` gets ONLY the entries whose dates fall inside the first log's `LOG_RANGE`.
+2. Ask the user for the second log's URL, then re-run the Step 2 fetch against it (mandatory — its existing entries must be preserved too, and its `week_starting`/`week_ending` confirm its range).
+3. Write the remaining entries to `devtools_fill_log_js_<range>.txt` (e.g. `devtools_fill_log_js_jul01-05.txt`) with the second LOG_ID.
+4. Tell the user both scripts must be pasted, each on its own log's URL.
 
 **Why `.txt`, not `.js`:** Copying JS from chat (or from a `.js` file in some editors) causes smart-quote mangling (`'` → `'`) which breaks JavaScript parsing. The `.txt` extension prevents this and avoids browser security prompts. Always write to disk — user copies from the file in their editor.
 
