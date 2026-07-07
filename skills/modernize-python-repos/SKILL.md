@@ -232,3 +232,194 @@ Checklist:
 11. **After completing all changes**, re-run the status checklist and confirm every item
     is ✅ Done. Flag any items that require out-of-band action (e.g. configuring PyPI
     trusted publisher).
+
+---
+
+## Testing the migration
+
+Run these checks after completing all three sections. All must pass before reporting the migration as done.
+
+### Test 1 — Make targets
+
+Run every Makefile target that does not require network access or external credentials and verify each exits with code 0:
+
+```bash
+# Install dev dependencies first
+make requirements
+
+# Then run each target
+make lint
+make format
+make test
+make docs   # skip if no docs/ directory exists
+```
+
+If any target fails, fix the root cause before moving on. Do not skip or mark a target as out-of-scope if it was working before the migration — a regression is a bug.
+
+### Test 2 — Package build and tarball contents
+
+Build the distribution and verify the tarball contains everything it should:
+
+```bash
+# Build (prefer uv-based invocation; fall back to plain python -m build)
+uv run python -m build
+# or, if uv is not available:
+#   pip install build && python -m build
+```
+
+Then inspect the generated `.tar.gz` under `dist/`:
+
+```bash
+# List what was produced
+ls dist/
+
+# Extract and inspect the tarball (replace <name>-<version> with the actual filename stem)
+tar -tzf dist/<name>-<version>.tar.gz | sort
+```
+
+Check that the tarball includes **all** of the following (adjust paths to match the repo layout):
+
+| Expected content | Why it must be present |
+|---|---|
+| `PKG-INFO` | PEP 566 metadata — generated from `pyproject.toml` |
+| `pyproject.toml` | Build recipe — must be included by setuptools |
+| `setup.cfg` (if any) | Should **not** be present — it was deleted |
+| Source package directory (e.g. `<package>/`) | All `.py` files under the package root |
+| `README.rst` or `README.md` | Linked via `readme =` in `[project]` |
+| `LICENSE` | Required for PyPI |
+| `MANIFEST.in` (if any) | Only if the repo uses inclusion-based manifests |
+| Static assets (e.g. `*.html`, `*.css`, `*.js`, `*.png` under the package) | Any non-`.py` file referenced by `package_data` or `MANIFEST.in` |
+
+Flag as a failure if:
+- Deleted files (`setup.py`, `setup.cfg`, `CHANGELOG.rst`, `pylintrc`) appear in the tarball — they should not be included after deletion.
+- The source package directory is missing or empty.
+- Static assets that existed before the migration are absent — their absence will break installs.
+
+### Test 3 — Lockfile consistency
+
+Verify the committed `uv.lock` is in sync with the current `pyproject.toml`. This catches the case where someone edited `pyproject.toml` after running `uv lock`:
+
+```bash
+uv lock --check
+```
+
+Must exit 0. If it fails, run `uv lock` to regenerate and commit the updated lockfile.
+
+### Test 4 — Dependency group resolution
+
+Verify every declared dependency group resolves without conflicts:
+
+```bash
+uv sync --group dev
+uv sync --group ci
+uv sync --group quality
+uv sync --group test
+```
+
+A conflict here (e.g. incompatible pins between a group and `[tool.uv].constraint-dependencies`) means the lockfile is broken for that environment. Fix by adjusting `[tool.edx_lint].uv_constraints` and re-running `edx_lint write_uv_constraints` + `uv lock`.
+
+### Test 5 — Tox environment listing
+
+Confirm tox can parse the updated `tox.ini` and resolve all declared environments without actually running them:
+
+```bash
+uv run tox --listenvs
+```
+
+If this fails (parse error, missing dependency group, unknown runner), the CI matrix will never run. Fix `tox.ini` before proceeding.
+
+### Test 6 — Package importability
+
+Install the package in editable mode and verify the top-level package can be imported cleanly (no missing dependencies, no import-time errors):
+
+```bash
+uv pip install -e .
+uv run python -c "import <package_name>; print('OK')"
+```
+
+Replace `<package_name>` with the actual importable module name (the directory under the repo root that contains `__init__.py`). A clean import confirms that `[project].dependencies` lists everything the package needs at runtime.
+
+### Test 7 — setuptools-scm version resolution
+
+Confirm that `setuptools-scm` can derive a version from git (required for `python -m build` to succeed in CI):
+
+```bash
+uv run python -m setuptools_scm
+```
+
+This should print a version string (e.g. `1.2.3` or `1.2.3.dev4+gabcdef`). If it prints an error about no git tags or a dirty working tree, note it — the build will fail until a tag exists, which is expected for a brand-new repo. If it errors on a repo that already has tags, the `[tool.setuptools_scm]` config is wrong.
+
+### Test 8 — Ruff lint and format
+
+Run ruff directly (not via make or tox) to confirm the `[tool.ruff]` config in `pyproject.toml` is valid and the codebase passes:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+```
+
+Both must exit 0. A config error (e.g. unknown rule code, bad `target-version`) surfaces here as a startup error rather than a lint finding — fix the `[tool.ruff]` table if that happens.
+
+### Test 9 — Wheel contents
+
+`python -m build` produces both a `.tar.gz` and a `.whl`. Inspect the wheel too:
+
+```bash
+# List wheel contents (replace filename with actual)
+unzip -l dist/<name>-<version>-py3-none-any.whl | sort
+```
+
+Check that:
+- The package directory and all its `.py` files are present.
+- Static assets (templates, JS, CSS, locale files) are included — wheels use `package_data` rules, not `MANIFEST.in`.
+- `METADATA` (wheel equivalent of `PKG-INFO`) is present under `<name>-<version>.dist-info/`.
+- No compiled `.pyc` files or test files appear in the wheel.
+
+If static assets are missing from the wheel but present in the tarball, add them under `[tool.setuptools.package-data]` in `pyproject.toml`.
+
+### Test 10 — No stale files on disk
+
+Confirm that files which should have been deleted are actually gone:
+
+```bash
+for f in setup.py setup.cfg CHANGELOG.rst pylintrc pylintrc_tweaks .coveragerc; do
+  [ -f "$f" ] && echo "STALE: $f still exists" || echo "OK: $f absent"
+done
+[ -d requirements ] && echo "STALE: requirements/ still exists" || echo "OK: requirements/ absent"
+```
+
+Any `STALE:` line is a failure — the file must be removed and the deletion committed.
+
+### Test 11 — GitHub Actions workflow YAML validity
+
+Validate the CI and release workflow files are syntactically correct YAML before pushing:
+
+```bash
+# Install yamllint if not present
+uv tool install yamllint
+
+# Check all workflow files
+uv tool run yamllint .github/workflows/
+```
+
+Alternatively, if `actionlint` is available:
+
+```bash
+brew install actionlint   # macOS
+actionlint .github/workflows/*.yml
+```
+
+A YAML syntax error in a workflow file causes a silent failure on GitHub (the workflow simply never runs). Catching it locally saves a push-and-wait cycle.
+
+### Test 12 — SHA pinning audit
+
+Scan every workflow file for GitHub Actions references that are not SHA-pinned. Floating tags (`@v4`, `@v10.5.3`) are forbidden by the implementation rules:
+
+```bash
+# Print any action reference that is NOT a 40-char SHA
+grep -rE 'uses:\s+\S+@' .github/workflows/ \
+  | grep -v '@[0-9a-f]\{40\}' \
+  | grep -v '^#'
+```
+
+Any output from this command means there is an un-pinned action. Replace the floating tag with its resolved SHA and add a version comment (e.g. `# v6.0.2`).

@@ -118,10 +118,14 @@ After spawning all agents, continue immediately to Step 4 — do NOT wait for ag
 
 ---
 
-## Step 4 — Ask to Open PRs in Chrome
+## Step 4 — Upgrades Summary, then Ask to Open PRs in Chrome
 
-Ask the user:
-> "Would you like me to open all PRs in Chrome for review? (y/n)"
+**Before asking anything**, present a short prose **Upgrades Summary** right after the Step 2 status table, so the user can review the notable version bumps first. Summarize the major upgrades across all PRs: group each `[MAJOR]` (and `[DOWNGRADE]`) package by version change, list which repos it affects, and call out which bump is most likely to have runtime implications downstream. Example:
+
+> **Upgrades Summary:** The major bumps this week are **setuptools 82 → 83** (in 8 repos), **lazy 1.6 → 2.0** (XBlock and xblock-sdk), and a **pandas 3.0.4 → 3.0.3 downgrade** in xapi-db-load — all passed CI, but the lazy 2.0 jump is the one most likely to have runtime implications downstream.
+
+Then ask the user:
+> "If you have read the upgrades summary, would you like me to open all PRs in Chrome for review? (y/n)"
 
 **Stop here and wait for the user to respond.**
 
