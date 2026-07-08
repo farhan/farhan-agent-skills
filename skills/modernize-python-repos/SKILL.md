@@ -40,6 +40,7 @@ Everything in this list must be verified and fixed if missing or wrong.
 - `[dependency-groups]` covers: `test-base`, `test`, `django42` (or similar legacy group), `quality`, `doc`, `ci`, `dev`
 - `[tool.uv].conflicts` lists the mutually exclusive Django version groups
 - `[tool.edx_lint].uv_constraints` present; `[tool.uv].constraint-dependencies` machine-managed (never edit directly)
+- **Mypy: retain if already present.** If the repo had mypy configured before the migration (mypy in requirements, a `make mypy` target, or a `[tool.mypy]` section), keep it — add `mypy` to the `quality` dependency group, retain or add a `[tool.mypy]` config block, add a `mypy` tox env, and keep a `make mypy` target. Do not add mypy to repos that did not use it before.
 - **Ruff replaces pylint/pycodestyle/pydocstyle/isort.** `[tool.ruff]` must have:
   - `line-length = 120`
   - `target-version = "py312"`
@@ -48,9 +49,11 @@ Everything in this list must be verified and fixed if missing or wrong.
   - `[tool.ruff.format]` `quote-style = "double"`, `indent-style = "space"`
 - **Coverage config in pyproject** — not in a separate `.coveragerc`:
   - `[tool.coverage.run]` with `branch = true`, `source`, `omit` patterns
-  - `[tool.coverage.report]` with `fail_under = 70`, `show_missing = true`, `exclude_lines`
+  - `[tool.coverage.report]` with `fail_under = <see rule below>`, `show_missing = true`, `exclude_lines`
   - `[tool.coverage.html]` with `directory = "htmlcov"`
+  - **`fail_under` rule:** read the old `.coveragerc` and `setup.cfg` first. If a `fail_under` value exists, carry it over exactly. If no threshold was set before, omit `fail_under` entirely — do not invent one.
 - `[tool.semantic_release]` has `build_command` using `python -m build` (never `uv build`)
+- No hardcoded `__version__` in the package's `__init__.py` — version is derived from git tags via `setuptools-scm`; the `importlib.metadata` API should be used instead if the version is needed at runtime
 
 ### Files to delete
 - `setup.py`
@@ -66,12 +69,14 @@ Everything in this list must be verified and fixed if missing or wrong.
 - All environments use `dependency_groups =` (not `deps =`)
 - Has a `quality` (or `lint`) env that runs `ruff check .` and `ruff format --check .`
 - Test envs named `py312-django{42,52}` or similar matrix form
+- Has a `mypy` env **if the repo used mypy before the migration**
 
 ### Makefile
 - `requirements` target: `uv sync --group dev` + `uv tool install tox --with tox-uv`
 - `upgrade` target: `uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml` then `uv lock --upgrade`
 - Has `lint`, `format`, `test`, `docs` targets (delegates to tox or uv run ruff)
 - `format` target uses `uv run ruff check --fix .` and `uv run ruff format .`
+- Has a `mypy` target (`uv run tox -e mypy`) **if the repo used mypy before the migration**
 
 ### CI workflow (python-tests.yml or ci.yml)
 - Has `workflow_call:` trigger so release.yml can reuse it
@@ -144,11 +149,12 @@ Checklist:
 - [ ] `[tool.setuptools_scm]` is configured (`version_scheme = "only-version"`,
       `local_scheme = "no-local-version"`). Do NOT set `root` unless the Python package
       lives in a subdirectory.
+- [ ] No hardcoded `__version__` in any `__init__.py` — remove it; version comes from git tags
 - [ ] **Ruff configured** — `[tool.ruff]`, `[tool.ruff.lint]` (E, W, F, I, B, C4, UP, DJ;
       ignore E501), `[tool.ruff.lint.isort]` (known-third-party), `[tool.ruff.format]`
       (quote-style, indent-style)
-- [ ] **Coverage config in pyproject** — `[tool.coverage.run/report/html]` present;
-      `.coveragerc` deleted
+- [ ] **Coverage config in pyproject** — `[tool.coverage.run/report/html]` present; `.coveragerc` deleted
+      - `fail_under`: carry over from old `.coveragerc`/`setup.cfg` if set; omit entirely if no threshold existed before
 - [ ] `setup.py` deleted
 - [ ] `setup.cfg` deleted
 - [ ] `CHANGELOG.rst` deleted
@@ -226,7 +232,8 @@ Checklist:
 9. **No separate `setup-python` step in CI.** Use `astral-sh/setup-uv` with
    `python-version` to handle Python installation; `setup-python` is redundant and
    inconsistent with the standard.
-10. **Check `requires-python` when bumping the Django/framework version matrix.** If the
+10. **Retain mypy if it was already in the repo.** Before starting, check if the repo had mypy configured (presence of `mypy` in requirements files, a `make mypy` target, or a tox mypy env). If so: add `mypy` to the `quality` dependency group, keep or add `[tool.mypy]` in `pyproject.toml`, add a `mypy` tox env, and add a `make mypy` target. Do not add mypy to repos that never used it.
+12. **Check `requires-python` when bumping the Django/framework version matrix.** If the
     new version drops support for an older Python, bump `requires-python` accordingly and
     remove that Python version from the tox envlist and CI matrix.
 11. **After completing all changes**, re-run the status checklist and confirm every item
@@ -392,24 +399,14 @@ Any `STALE:` line is a failure — the file must be removed and the deletion com
 
 ### Test 11 — GitHub Actions workflow YAML validity
 
-Validate the CI and release workflow files are syntactically correct YAML before pushing:
-
-```bash
-# Install yamllint if not present
-uv tool install yamllint
-
-# Check all workflow files
-uv tool run yamllint .github/workflows/
-```
-
-Alternatively, if `actionlint` is available:
+Validate the CI and release workflow files are syntactically correct YAML before pushing. Use `actionlint`, not `yamllint` — `yamllint`'s 80-char line limit flags every SHA-pinned action line as an error, producing noise that cannot be fixed without removing the SHA or the version comment. `actionlint` checks for real structural problems (unknown fields, bad expressions, missing secrets) without style rules:
 
 ```bash
 brew install actionlint   # macOS
-actionlint .github/workflows/*.yml
+actionlint .github/workflows/ci.yml .github/workflows/release.yml
 ```
 
-A YAML syntax error in a workflow file causes a silent failure on GitHub (the workflow simply never runs). Catching it locally saves a push-and-wait cycle.
+A syntax or structural error in a workflow file causes a silent failure on GitHub (the workflow simply never runs). Catching it locally saves a push-and-wait cycle.
 
 ### Test 12 — SHA pinning audit
 
@@ -423,3 +420,161 @@ grep -rE 'uses:\s+\S+@' .github/workflows/ \
 ```
 
 Any output from this command means there is an un-pinned action. Replace the floating tag with its resolved SHA and add a version comment (e.g. `# v6.0.2`).
+
+### Test 13 — Bundle diff against main
+
+Compare the distribution tarball produced on the PR branch against one built from `main` (or `master`) to catch accidental file exclusions introduced by the migration.
+
+**Step 1 — Build on main/master using a worktree:**
+
+Do **not** use `git stash` + `git checkout` + `git stash pop` — this causes merge conflicts when the stash contains changes that conflict with the branch being checked out. Use a git worktree instead, which gives a clean isolated checkout with no risk to the current working tree:
+
+```bash
+# Create an isolated checkout of the base branch
+git worktree add /tmp/bundle-worktree-main main   # or: master
+
+# Confirm the key files are there
+ls /tmp/bundle-worktree-main/
+```
+
+**Step 2 — Build from the worktree:**
+
+The old `setup.py` often reads files like `requirements.txt` using a relative path. `python -m build` (with its default isolated build environment) can fail to find those files because the build frontend may change the working directory. Use `--no-isolation` to build directly in the project directory:
+
+```bash
+cd /tmp/bundle-worktree-main
+python -m build --no-isolation --outdir /tmp/bundle-main
+ls /tmp/bundle-main/
+```
+
+If `--no-isolation` fails due to missing build deps, install them first:
+
+```bash
+pip install setuptools wheel build
+python -m build --no-isolation --outdir /tmp/bundle-main
+```
+
+**Step 3 — Build on the PR branch:**
+
+```bash
+REPO_DIR=$(git -C /tmp/bundle-worktree-main rev-parse --show-toplevel 2>/dev/null || echo ".")
+# Build from the original repo directory (PR branch is already checked out there)
+cd /path/to/repo   # or just stay in the repo root
+
+uv run python -m build --outdir /tmp/bundle-pr
+ls /tmp/bundle-pr/
+```
+
+**Step 4 — Compare tarball contents (strip version prefix first):**
+
+Version strings differ between branches, so strip the `<name>-<version>/` prefix before diffing:
+
+```bash
+# Replace <pkg> with the actual package name (e.g. openedx_webhooks)
+diff \
+  <(tar -tzf /tmp/bundle-main/<pkg>-*.tar.gz | sed 's|[^/]*/||' | sort) \
+  <(tar -tzf /tmp/bundle-pr/<pkg>-*.tar.gz   | sed 's|[^/]*/||' | sort)
+```
+
+Interpret the diff output:
+- Lines starting with `<` — present in **main** but **missing from PR**. These are regressions.
+- Lines starting with `>` — present in **PR** but not in main. These are expected additions (new tooling files).
+
+**Step 5 — Compare wheel contents:**
+
+```bash
+diff \
+  <(unzip -l /tmp/bundle-main/<pkg>-*-py3-none-any.whl | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort) \
+  <(unzip -l /tmp/bundle-pr/<pkg>-*-py3-none-any.whl   | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort)
+```
+
+**Step 6 — Clean up the worktree:**
+
+```bash
+git worktree remove /tmp/bundle-worktree-main --force
+```
+
+**Flag as REGRESSION** if any of the following are missing from the PR bundle but present in main:
+
+| Missing file type | Consequence |
+|---|---|
+| Any `.py` file under the source package directory | Broken installs — code simply won't be there |
+| Static assets (`*.html`, `*.css`, `*.js`, `*.png`, `*.json`, `*.po`, `*.mo`) | UI or locale breakage at runtime |
+| `LICENSE`, `README.*`, `pyproject.toml` | Missing PyPI metadata — may fail upload validation |
+| `setup.cfg`, `setup.py` (deleted intentionally) | These should NOT appear in main's bundle either; if they do, note it but do not re-add them |
+
+**Common false regressions (expected PR-only additions):**
+
+| Added in PR | Reason |
+|---|---|
+| `pyproject.toml`, `tox.ini`, `uv.lock` | New tooling files — expected |
+| `release.yml`, `commitlint.yml` | New workflow files — expected |
+| `.github/workflows/` entries | New or updated CI files — expected |
+| `openedx_webhooks.egg-info/scm_file_list.json`, `scm_version.json` | setuptools-scm artifacts — expected |
+
+**Watch for the implicit namespace package trap (wheel only):**
+
+Modern setuptools (via PEP 420) treats any directory without `__init__.py` as an implicit namespace package and may include it in the wheel. Common culprits: `docs/`, `scripts/`, `bin/`. If a non-source directory appears in the PR wheel but not the main wheel, fix it by adding it to the exclude list in `pyproject.toml`:
+
+```toml
+[tool.setuptools.packages.find]
+exclude = ["tests*", "*.tests", "*.tests.*", "docs*"]
+```
+
+Also check the inverse: static assets (templates, JS, CSS) that were in the main wheel but missing from the PR wheel. This happens when `setup.py` used `include_package_data=True` or `package_data` and the new `pyproject.toml` doesn't replicate it. Fix with:
+
+```toml
+[tool.setuptools.package-data]
+"mypackage" = ["templates/*", "static/**/*"]
+```
+
+### Test 14 — Logic change audit
+
+Review the full PR diff and flag any changes that alter runtime behaviour, not just tooling or configuration. A pure migration should contain no logic changes — only file deletions, pyproject.toml additions, tox/Makefile/CI rewrites, and lockfile additions.
+
+```bash
+git diff main...HEAD -- '*.py'
+```
+
+Read every modified `.py` file in the diff. For each changed function, class, or module-level statement, classify the change as one of:
+
+| Class | Description | Acceptable? |
+|---|---|---|
+| **Mechanical rename** | Import path changed because a file moved | Yes |
+| **Dead code removal** | Unused import or variable deleted | Yes, flag it |
+| **Logic change** | Conditional, loop, assignment, or return value changed | No — must be justified |
+| **New behaviour** | New function, method, or branch added | No — must be justified |
+
+Report each finding in this format:
+
+```
+FILE: <path>
+TYPE: <Mechanical rename | Dead code removal | Logic change | New behaviour>
+LINES: <line range in the PR diff>
+SUMMARY: <one sentence description>
+ACTION REQUIRED: <Yes / No>
+```
+
+Any finding marked `ACTION REQUIRED: Yes` must be resolved before the PR is considered migration-only. Resolution options:
+1. Revert the change and open a separate PR for it.
+2. Add a comment in the PR description explaining why the logic change is intentional and safe as part of this migration.
+
+### Test 15 — No hardcoded `__version__` in package source
+
+With `setuptools-scm` deriving the version from git tags, any hardcoded `__version__` string is permanently wrong after the first tag. Check that no such string exists:
+
+```bash
+grep -rn '__version__' --include='*.py' .
+```
+
+Any match in the package source (i.e. not in test or build tooling) is a failure. Remove the line. If the version is genuinely needed at runtime, replace it with:
+
+```python
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("your-package-name")
+except PackageNotFoundError:
+    pass
+```
+
+A bare `__version__ = "0.1.0"` (or any static string) must not remain after the migration.
