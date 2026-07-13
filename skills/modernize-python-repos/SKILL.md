@@ -923,7 +923,57 @@ grep -E "password:|PYPI_UPLOAD_TOKEN" .github/workflows/release.yml || echo "(no
 
 ---
 
-### Test 21 — Django AppConfig signal imports preserved
+### Test 21 — Configuration thresholds must maintain parity with master
+
+**Critical:** Do NOT introduce new configuration thresholds, limits, or settings that don't exist in master/main. Migration is about tooling upgrades, not policy changes.
+
+**Step 1 — Check master's configuration files:**
+
+```bash
+# Check old .coveragerc for fail_under
+git show master:.coveragerc 2>/dev/null | grep -i "fail_under" || echo "(none)"
+
+# Check old setup.cfg for any thresholds
+git show master:setup.cfg 2>/dev/null | grep -E "fail_under|threshold|limit" || echo "(none)"
+```
+
+**Step 2 — Compare against new pyproject.toml:**
+
+```bash
+# Check new pyproject.toml for fail_under in coverage config
+grep "fail_under" pyproject.toml || echo "(none)"
+
+# Check for any new threshold settings
+grep -E "fail_under|min_percent|threshold|limit" pyproject.toml | grep -v "# " || echo "(none)"
+```
+
+**Pattern to validate:**
+
+```toml
+# ✅ CORRECT: Parity with master
+[tool.coverage.report]
+exclude_lines = [...]
+show_missing = true
+# No fail_under — matches master's .coveragerc
+```
+
+```toml
+# ❌ WRONG: New threshold introduced
+[tool.coverage.report]
+exclude_lines = [...]
+fail_under = 70  # NOT in master — remove it!
+show_missing = true
+```
+
+**Pass:** All configuration thresholds in pyproject.toml match what was in master's old config files (.coveragerc, setup.cfg, etc.). No new limits added.
+
+**Fail:** New thresholds/limits introduced (e.g., `fail_under`, `min_coverage`, etc.) that don't exist in master.
+
+**Recovery:** Remove any new configuration settings. Keep only what existed in master. If a threshold was present before, carry it over exactly as it was.
+
+---
+
+### Test 22 — Django AppConfig signal imports preserved
 
 **Only for Django apps** (check `[project.entry-points."lms.djangoapp"]` in pyproject.toml).
 
