@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>JSInput Color Picker</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; }
+  .swatch {
+    display: inline-block; width: 50px; height: 50px; margin: 4px;
+    border: 3px solid transparent; border-radius: 4px; cursor: pointer;
+  }
+  .swatch.selected { border-color: #333; }
+</style>
+</head>
+<body>
+  <p>Click the blue color:</p>
+  <div>
+    <span class="swatch" data-color="red"    style="background:#c0392b"></span>
+    <span class="swatch" data-color="green"  style="background:#27ae60"></span>
+    <span class="swatch" data-color="blue"   style="background:#2980b9"></span>
+    <span class="swatch" data-color="yellow" style="background:#f1c40f"></span>
+  </div>
+
+  <script>
+    var state = { selected_color: "" };
+
+    function select(color) {
+      state.selected_color = color;
+      var swatches = document.querySelectorAll(".swatch");
+      for (var i = 0; i < swatches.length; i++) {
+        swatches[i].classList.toggle("selected", swatches[i].dataset.color === color);
+      }
+    }
+
+    document.querySelectorAll(".swatch").forEach(function (el) {
+      el.addEventListener("click", function () { select(this.dataset.color); });
+    });
+
+    window.ColorPicker = {
+      getGrade: function () { return JSON.stringify(state); },
+      getState: function () { return JSON.stringify(state); },
+      setState: function (serialized) {
+        try {
+          state = JSON.parse(serialized);
+          if (state.selected_color) { select(state.selected_color); }
+        } catch (e) { /* keep defaults on bad state */ }
+      }
+    };
+  </script>
+</body>
+</html>

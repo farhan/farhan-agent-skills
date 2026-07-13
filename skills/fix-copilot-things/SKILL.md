@@ -75,18 +75,36 @@ Collect all threads where at least one comment is authored by a login that conta
 
 Resolved threads (`isResolved: true`) are always skipped entirely.
 
+Also fetch the PR diff to establish which files and line ranges were actually changed by this PR:
+
+```bash
+gh pr diff PR_NUMBER
+```
+
+Parse the diff to build a map of `{ path → set of changed line numbers }`. A line is "changed" if it appears as an added (`+`) or context line in any hunk that touches it. This map is used in Step 4 to determine scope.
+
 ## Step 4: Triage Each Thread
 
 ### Active threads
 
 For each active Copilot thread, read the comment body and the `diffHunk` to understand the context.
 
+**First, determine whether the suggestion is within scope of this PR.**
+
+A suggestion is **in scope** if the file and line it targets were actually changed (added, modified, or are immediate context around a change) in this PR's diff. Use the diff map built in Step 3:
+
+- Check whether `thread.path` appears in the diff at all.
+- Check whether `thread.line` (or `thread.originalLine` if `line` is null) falls within a changed hunk in that file.
+
+If the suggestion targets pre-existing code that was **not touched by this PR** — i.e., the file/line was already there before and the PR did not change it — classify it as **OUT-OF-SCOPE**.
+
 Classify each thread as one of:
 
 | Class | Criteria |
 |---|---|
-| **ADDRESSABLE** | The suggestion is concrete, correct, and improves code quality, readability, or correctness. It can be implemented by editing the file. |
-| **NOT-ADDRESSABLE** | The suggestion is vague, debatable, context-dependent, already handled elsewhere, or would require changes outside the scope of this PR. |
+| **OUT-OF-SCOPE** | The suggestion targets a file or line that was not changed by this PR. It is a pre-existing issue unrelated to the PR's changes. |
+| **ADDRESSABLE** | In scope. The suggestion is concrete, correct, and improves code quality, readability, or correctness. It can be implemented by editing the file. |
+| **NOT-ADDRESSABLE** | In scope, but the suggestion is vague, debatable, context-dependent, already handled elsewhere, or would require changes outside the scope of this PR. |
 
 ### Outdated threads
 
@@ -99,6 +117,26 @@ Do **not** skip outdated threads — always reply to them. Before replying, chec
   > "Thread is outdated — this was resolved in the latest push. `<brief explanation of what changed>`."
 
 After posting the reply, **always resolve the thread** regardless of which case applies:
+
+```bash
+gh api graphql -f query='
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { isResolved }
+  }
+}' -f threadId=THREAD_ID
+```
+
+### For OUT-OF-SCOPE threads
+
+Reply with a short, professional comment explaining the suggestion is outside the PR's scope, then resolve the thread:
+
+```bash
+gh api repos/OWNER/REPO/pulls/comments/COMMENT_DB_ID/replies \
+  -f body="This suggestion targets pre-existing code that was not changed by this PR, so it falls outside the scope of these changes. It won't be addressed here — please open a separate issue or PR if it needs attention."
+```
+
+Then resolve:
 
 ```bash
 gh api graphql -f query='
@@ -146,7 +184,8 @@ Print a summary table:
 Thread | File | Copilot Comment (truncated) | Action
 -------|------|----------------------------|-------
 1      | foo/bar.py:42 | "Use list comprehension..." | RESOLVED (code changed)
-2      | foo/baz.py:10 | "Consider adding type hint..." | REPLIED (out of scope)
+2      | foo/baz.py:10 | "Consider adding type hint..." | REPLIED (not addressable)
+3      | foo/old.py:5  | "Variable shadowing here..." | REPLIED + RESOLVED (out of PR scope)
 ```
 
 ## Step 6: Commit the Changes
@@ -201,7 +240,8 @@ git push origin <branch>
 ## Notes
 
 - Only target threads from Copilot (login contains `copilot` case-insensitively). Skip threads from human reviewers.
-- Do not resolve threads unless the corresponding code change has actually been made.
+- Do not resolve threads unless the corresponding code change has actually been made, or unless the thread is out-of-scope or outdated.
+- **Out-of-scope threads are always replied to and resolved** — they do not get a code change, but they must not be left open.
 - Do not skip outdated threads — always reply to them after checking if the underlying issue still exists in the current code.
 - Do not auto-push — always ask first, per the commit skill convention.
 - If no Copilot threads are found, tell the user and stop.

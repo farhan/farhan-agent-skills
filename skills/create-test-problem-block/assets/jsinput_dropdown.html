@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>JSInput Dropdown</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; }
+  select { font-size: 15px; padding: 4px; }
+</style>
+</head>
+<body>
+  <p>Which planet is closest to the Sun?</p>
+  <select id="planet">
+    <option value="">-- choose --</option>
+    <option value="incorrect">Venus</option>
+    <option value="correct">Mercury</option>
+    <option value="incorrect">Earth</option>
+    <option value="incorrect">Mars</option>
+  </select>
+
+  <script>
+    var state = { answer: "" };
+
+    document.getElementById("planet").addEventListener("change", function () {
+      state.answer = this.value;
+    });
+
+    // JSInput contract: gradefn/get_statefn/set_statefn referenced from the OLX
+    window.JSInputDropdown = {
+      getGrade: function () { return JSON.stringify(state); },
+      getState: function () { return JSON.stringify(state); },
+      setState: function (serialized) {
+        try {
+          state = JSON.parse(serialized);
+          var sel = document.getElementById("planet");
+          for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === state.answer) { sel.selectedIndex = i; break; }
+          }
+        } catch (e) { /* keep defaults on bad state */ }
+      }
+    };
+  </script>
+</body>
+</html>
