@@ -1,17 +1,27 @@
 ---
 name: review-pr
 description: This skill should be used when the user says "review PR", "review pull request", "start PR review", "I'm reviewing a PR", "let's review a PR", or starts a pull request review session. Gathers GitHub issue context, PR details, iterates through commits, and performs a thorough multi-dimensional code review.
-version: 1.0.0
+version: 1.1.0
 allowed-tools: Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh pr checks:*), Bash(gh api:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*)
 ---
 
 # PR Review Skill
 
-A comprehensive pull request review workflow that combines GitHub issue context, full commit history analysis, and multi-dimensional code quality checks.
+**Base skill:** Invoke the built-in `/review` skill first to perform the core PR review.
 
-## Phase 1: Gather Context
+```
+Skill({ skill: "review" })
+```
 
-### 1a. GitHub Issue (Story/Ticket context)
+Then apply the additional checks below as supplementary dimensions on top of the base review.
+
+---
+
+## Additional Notes
+
+### GitHub Issue Context (Story/Ticket)
+
+Before starting the review, gather the GitHub issue context if available:
 
 If the user has not provided a GitHub issue number or URL, ask:
 > "What is the GitHub issue number or URL for this PR? (e.g. #123 or https://github.com/owner/repo/issues/123)"
@@ -27,85 +37,31 @@ Extract and note:
 - Any linked PRs mentioned in the issue body
 - Acceptance criteria or definition of done (look for checklists)
 
-### 1b. PR Details
+### Commit History Details
 
-If the user has not provided a PR number or URL, ask:
-> "What is the PR number or URL? (e.g. #456 or https://github.com/owner/repo/pull/456)"
-
-Once provided, run the following to understand the PR fully:
-
+List all commits in the PR and iterate through each:
 ```bash
-# View PR metadata
-gh pr view <pr-number> --repo <owner/repo>
-
-# Get the base branch and head branch
-gh pr view <pr-number> --repo <owner/repo> --json baseRefName,headRefName,commits,additions,deletions,changedFiles
-
-# List all commits in the PR
 gh pr view <pr-number> --repo <owner/repo> --json commits --jq '.commits[] | "\(.oid[0:8]) \(.messageHeadline)"'
-
-# Get the full diff
-gh pr diff <pr-number> --repo <owner/repo>
 ```
 
-Note:
-- Base branch (target branch the PR merges into)
-- Head branch (the PR branch)
-- Number of commits, files changed, additions/deletions
-- Iterate through each commit and summarize its purpose
+For each commit:
+- Is the commit message meaningful and descriptive?
+- Does the commit represent a logical unit of work?
+- Are there "WIP", "fixup", "temp" commits that should be squashed?
+- Use `git show <commit-sha>` for any commits that seem out of place
 
-## Phase 2: Pre-Review Eligibility Check
+### Extra Review Dimensions
 
-Before proceeding with a full review, quickly verify:
-- Is the PR still open (not closed or merged)?
-- Is it a draft PR? (If so, note it but still review unless the user says otherwise)
-- Is it an automated/bot PR (e.g. Dependabot, Renovate)? If so, apply a lighter review focused on dependency safety.
+Run these in addition to the base `/review` findings:
 
-## Phase 3: Multi-Dimensional Code Review
-
-Launch the following review dimensions in parallel (use Sonnet agents where possible):
-
-### Dimension 1 — Story/Issue Alignment
+#### Story/Issue Alignment
 Compare the PR changes against the GitHub issue requirements:
 - Does the implementation satisfy the acceptance criteria from the issue?
-- Are there any requirements from the issue that are NOT addressed in the PR?
-- Are there any changes in the PR that go beyond the issue scope (scope creep)?
+- Are there requirements from the issue NOT addressed in the PR?
+- Are there changes in the PR that go beyond the issue scope (scope creep)?
 - Flag any "unwanted changes" — modifications unrelated to the issue
 
-### Dimension 2 — Bug & Logic Review
-Read the full diff carefully:
-- Logic errors or off-by-one mistakes
-- Incorrect conditionals or edge cases not handled
-- Null/undefined/None dereferences
-- Race conditions or concurrency issues
-- Incorrect error handling or silent failures
-- Wrong return values or missing returns
-
-### Dimension 3 — Security Review
-Check for OWASP Top 10 and common security issues:
-- SQL injection, XSS, CSRF vulnerabilities
-- Hardcoded secrets, tokens, or credentials
-- Insecure use of eval, exec, or shell commands
-- Missing authentication/authorization checks
-- Sensitive data exposure in logs or responses
-- Insecure deserialization
-
-### Dimension 4 — Code Quality & Conventions
-Check adherence to the project's CLAUDE.md and coding standards:
-- Style, naming conventions, and formatting
-- Dead code, commented-out code, debug statements left in
-- Overly complex code that could be simplified
-- Missing or incorrect tests for new functionality
-- Documentation/comments accuracy
-
-### Dimension 5 — Commit History Quality
-Iterate through each commit in the PR:
-- Are commit messages meaningful and descriptive?
-- Does each commit represent a logical unit of work?
-- Are there "WIP", "fixup", "temp" commits that should be squashed?
-- Check `git show <commit-sha>` for any commits that seem out of place
-
-### Dimension 6 — Unwanted/Accidental Changes
+#### Unwanted/Accidental Changes
 Look for changes that shouldn't be in this PR:
 - Whitespace-only changes in unrelated files
 - Unrelated refactoring mixed with feature changes
@@ -113,40 +69,18 @@ Look for changes that shouldn't be in this PR:
 - Merge conflict markers left in code (`<<<<<<<`, `=======`, `>>>>>>>`)
 - Version bumps or lockfile changes that are unintentional
 
-## Phase 4: Scoring & Filtering
+### Scope Rule (strictly enforced)
 
-For each issue found across all dimensions, score confidence (0-100):
-- **0**: False positive / pre-existing issue not introduced by this PR
-- **25**: Possible issue but could be intentional
-- **50**: Real issue but minor / nitpick
-- **75**: Confirmed real issue that will impact functionality
-- **100**: Definite bug / security issue / clearly wrong
+Every finding MUST be rooted in a line that appears in the PR diff (`+` or `-` lines). Do NOT flag issues in surrounding context lines, unchanged files, or pre-existing code the PR didn't touch — even if you spot a general improvement opportunity. The review is of what changed, not of the codebase at large.
 
-Only surface issues with a score >= 60.
+**Never recommend improvements to code the PR didn't change.** If you notice a pre-existing issue in surrounding context, silently ignore it.
 
-## Phase 5: Final Report
+### Additional Report Sections
 
-Present the review in this format:
-
----
-
-### PR Review: <PR title> (#<number>)
-
-**Issue:** #<issue-number> — <issue title>
-**Base:** `<base-branch>` ← `<head-branch>`
-**Commits reviewed:** <N> commits | **Files changed:** <N> | +<additions> -<deletions>
+Append these sections to the base `/review` report:
 
 #### Story Alignment
 <Did the PR fully address the issue? Any gaps or scope creep?>
-
-#### Issues Found (<N> total)
-
-**[SEVERITY]** Brief title of issue
-- **Where:** `path/to/file.py:L42-L47` (link with full SHA if on GitHub)
-- **Why:** Clear explanation of the problem
-- **Suggestion:** How to fix it
-
-_(Repeat for each issue, grouped by severity: CRITICAL > HIGH > MEDIUM)_
 
 #### Unwanted Changes
 <List any changes that appear unrelated to the issue or accidental>
@@ -154,12 +88,44 @@ _(Repeat for each issue, grouped by severity: CRITICAL > HIGH > MEDIUM)_
 #### Commit Quality
 <Notes on commit hygiene — squash candidates, misleading messages, etc.>
 
-#### Summary
-<Overall assessment: Approve / Request Changes / Needs Discussion>
+### Test Cases for Common Pattern Violations
 
----
+#### Linter Migration: Django AppConfig Signal Imports
 
-## Notes
+When reviewing PRs that migrate Django projects from pylint to ruff (or similar linter upgrades):
+
+**❌ Common Issue:** Signal imports inside `AppConfig.ready()` are removed because they appear unused to static analysis:
+
+```python
+# WRONG: import was simply deleted
+class ForumConfig(AppConfig):
+    def ready(self) -> None:
+        """Import Signals."""
+        # import forum.signals removed — handlers won't register!
+```
+
+**✅ Correct Fix:** Preserve the import with ruff suppression instead of pylint:
+
+```python
+class ForumConfig(AppConfig):
+    def ready(self) -> None:
+        """Import Signals."""
+        import forum.signals  # noqa: F401
+```
+
+**Why this matters:**
+- Django's `@receiver` decorators on signal handlers only register when the module is imported
+- Removing the import silently breaks signal-dependent functionality (search indexing, cache invalidation, etc.)
+- The import MUST stay in `ready()` to preserve the lazy-loading pattern — don't move it to module level
+- Replace pylint directives with `# noqa: F401` (ruff syntax)
+
+**Review checklist for linter migrations:**
+- [ ] Django AppConfig signal imports are preserved (not deleted)
+- [ ] Imports stay inside `ready()` method (don't move to module level)
+- [ ] Pylint directives converted to ruff `# noqa` syntax
+- [ ] No unrelated logic changes mixed with linter updates
+
+### Notes
 
 - Use `gh` CLI for all GitHub interactions; do not use web fetch for PR/issue data
 - Always use the full commit SHA when linking to specific lines in GitHub URLs

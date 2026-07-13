@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>JSInput Slider</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; }
+  input[type=range] { width: 300px; vertical-align: middle; }
+  #readout { font-weight: bold; margin-left: 10px; }
+</style>
+</head>
+<body>
+  <p>Set the slider to 7:</p>
+  <input type="range" id="slider" min="0" max="10" step="0.5" value="0">
+  <span id="readout">0</span>
+
+  <script>
+    var state = { value: 0 };
+    var slider = document.getElementById("slider");
+    var readout = document.getElementById("readout");
+
+    slider.addEventListener("input", function () {
+      state.value = parseFloat(this.value);
+      readout.textContent = this.value;
+    });
+
+    window.Slider = {
+      getGrade: function () { return JSON.stringify(state); },
+      getState: function () { return JSON.stringify(state); },
+      setState: function (serialized) {
+        try {
+          state = JSON.parse(serialized);
+          slider.value = state.value;
+          readout.textContent = state.value;
+        } catch (e) { /* keep defaults on bad state */ }
+      }
+    };
+  </script>
+</body>
+</html>
