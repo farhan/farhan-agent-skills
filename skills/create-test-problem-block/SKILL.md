@@ -1,6 +1,6 @@
 ---
 name: create-test-problem-block
-description: Full 3-step problem block test workflow. Step 1 builds a 92-unit Open edX course in Studio (14 subsections, all problem types, OLX populated, published, user enrolled). Step 2 clones it as a "-Wrong Submissions" re-run course for wrong-answer testing. Step 3 runs Playwright headed Chrome to submit correct answers on the original (verify all show Correct), spot-check the re-run, then submit wrong answers on the re-run (verify all show Incorrect). Use when asked to "set up problem block testing", "create problem block test course", "build the problem block test structure", or "run problem block browser tests".
+description: Full 3-step problem block test workflow. Step 1 builds a 92-unit Open edX course in Studio (11 subsections: 9 automatable + "Code Jail Code Blocks" + "Hard/Manual Testing Blocks", OLX populated, published, user enrolled). Step 2 clones it as a "-Wrong Submissions" re-run course for wrong-answer testing. Step 3 runs Playwright headed Chrome to submit correct answers on the original (70 automatable units, verify all show Correct), spot-check the re-run, then submit wrong answers on the re-run (verify all show Incorrect). Use when asked to "set up problem block testing", "create problem block test course", "build the problem block test structure", or "run problem block browser tests".
 argument-hint: [studio-url] [lms-url] [username] [password]
 allowed-tools: Bash(curl:*), Bash(python3:*), Bash(grep:*), Bash(cat:*), Bash(find:*), Bash(ls:*), Bash(rm:*)
 ---
@@ -17,13 +17,17 @@ The test matrix targets the three capa JS files: `display.js` (all standard resp
 
 | Step | What it does | When to run |
 |---|---|---|
-| **Step 1: Course Creation** | Builds the 92-unit course in Studio, uploads assets, publishes, enrols user. | First run, or when you need a fresh course. |
+| **Step 1: Course Creation** | Builds the 92-unit course in Studio (11 subsections), uploads assets, publishes, enrols user. | First run, or when you need a fresh course. |
 | **Step 2: Re-Run Course** | Creates `{title} -Wrong Submissions` (run `2026_WS`) with identical content. | After Step 1, keeps the original clean for Step 3.1. |
 | **Step 3: Browser Testing** | Playwright headed Chrome — correct submissions on original (3.1), spot-check re-run (3.2), wrong submissions on re-run (3.3). | After Steps 1 & 2. |
 
-**Automatable problems (80/92):** Single Select, Multi-Select, Dropdown, Numerical Input, Text Input, Custom Python, Math Expression, Adaptive Hint, Multipart, Choice Text Input.
+**Automatable problems (70/92):** Single Select, Multi-Select, Dropdown, Numerical Input, Text Input, Math Expression, Adaptive Hint, Multipart, Choice Text Input.
 
-**Skipped (12 — manual testing needed):** Image Mapped Input ×4, Circuit Schematic Builder ×3, Custom JavaScript ×3, Chemical Equation Input ×2.
+**Skipped — Codejail required (10/92):** All units in `Code Jail Code Blocks` subsection. These use `<script type="loncapa/python">` or `customresponse` with a Python `cfn`. They work correctly when the Open edX Codejail sandbox is configured, but fail in minimal local environments. In automation, skip them with reason `'codejail'`.
+
+**Skipped — Manual testing only (12/92):** All units in `Hard/Manual Testing Blocks` subsection — `jsinput` ×3, `imageresponse` ×4, `schematicresponse` ×3, `chemicalequationinput` ×2. These require canvas interaction, pixel-click grading, or special browser APIs that Playwright cannot drive reliably. Verify these by hand.
+
+> **Schematic note:** `schematicresponse` blocks require `parts="r,v"` (single-letter codes from `parts_map`). Full names like `parts="resistor voltage"` cause `ReferenceError` and show the "browser error" message. The OLX in this skill uses correct codes.
 
 Each Step is independent — re-run Step 3 without repeating Steps 1 & 2. The temp files used are:
 - Step 1: `/tmp/seq_map.json`, `/tmp/verticals.json`, `/tmp/problem_progress.json`
@@ -205,9 +209,9 @@ Stop if `CHAPTER_ID` is empty.
 
 ---
 
-## Phase 5: Create the 14 Subsections
+## Phase 5: Create the 11 Subsections
 
-Use a Python script to create all 14 sequentials and save their locators. Save to `/tmp/seq_map.json` so later phases can reference them.
+Use a Python script to create all 11 sequentials and save their locators. Save to `/tmp/seq_map.json` so later phases can reference them.
 
 ```python
 import json, subprocess
@@ -229,12 +233,14 @@ def refresh_csrf():
     return get_csrf()
 
 subsections = [
+    # Standard automatable types
     "Single Select", "Multi-Select", "Dropdown", "Numerical Input",
-    "Text Input", "Custom Python-Evaluated Input",
-    "Custom JavaScript Display and Grading", "Image Mapped Input",
-    "Math Expression Input", "Problem with Adaptive Hint",
-    "Multipart Components", "Circuit Schematic Builder",
-    "Chemical Equation Input", "Choice Text Input",
+    "Text Input", "Math Expression Input", "Problem with Adaptive Hint",
+    "Multipart Components", "Choice Text Input",
+    # Codejail-dependent (work when Codejail sandbox is configured)
+    "Code Jail Code Blocks",
+    # Manual testing only (canvas/special-widget UI)
+    "Hard/Manual Testing Blocks",
 ]
 
 csrf = get_csrf()
@@ -272,8 +278,8 @@ for name in subsections:
 with open('/tmp/seq_map.json', 'w') as f:
     json.dump(seq_map, f, indent=2)
 
-print(f"\n{len(seq_map)}/14 subsections created")
-assert len(seq_map) == 14, "Expected 14 subsections — stop and investigate before continuing"
+print(f"\n{len(seq_map)}/11 subsections created")
+assert len(seq_map) == 11, "Expected 11 subsections — stop and investigate before continuing"
 ```
 
 ---
@@ -303,6 +309,7 @@ def refresh_csrf():
     return get_csrf()
 
 UNITS = {
+    # ── Standard automatable subsections (70 units) ───────────────────────────
     "Single Select": [
         "Standard configuration with basic answers",
         "Explanation fields with answer visibility settings",
@@ -329,7 +336,7 @@ UNITS = {
         "Partial credit using halves method",
         "Compound hints based on answer combinations",
         "Advanced choice hints for selected vs. unselected states",
-        "Python scripting with randomization",
+        # NOTE: "Python scripting with randomization" moved to Code Jail Code Blocks
         "Simple Markdown checkbox syntax",
         "Markdown with explanation blocks",
     ],
@@ -356,11 +363,11 @@ UNITS = {
         "Basic percentage tolerance (2% margin)",
         "Scientific notation with alternative answers",
         "Partial credit with close range scoring",
-        "Python scripted calculations (Pythagorean theorem)",
+        # NOTE: "Python scripted calculations (Pythagorean theorem)" moved to Code Jail Code Blocks
         "Trailing text for units display",
         "Simple Markdown numerical format",
         "Markdown with percentage tolerance and explanations",
-        "Rerandomize on reset with scripted variables",
+        # NOTE: "Rerandomize on reset with scripted variables" moved to Code Jail Code Blocks
     ],
     "Text Input": [
         "Basic vocabulary synonym checking",
@@ -374,30 +381,12 @@ UNITS = {
         "Simple Markdown text input with alternatives",
         "Markdown with regex and explanations",
         "Multi-field text input with combined feedback",
-        "Text input with randomized answer variants",
-    ],
-    "Custom Python-Evaluated Input": [
-        "Math constraint validation (sum to expected value)",
-        "Partial credit scoring based on input percentage",
-        "Randomized parameters with dynamic math",
-        "Multi-input specific feedback per field",
-        "String logic including palindrome checking",
-    ],
-    "Custom JavaScript Display and Grading": [
-        "Dynamic dropdown with JSON state management",
-        "Visual color picker (click interaction)",
-        "Slider math with numerical logic",
-    ],
-    "Image Mapped Input": [
-        "Single rectangular region definition",
-        "Multiple rectangular regions (either correct)",
-        "Irregular polygon regions using coordinate points",
-        "Multiple image inputs in one problem",
+        # NOTE: "Text input with randomized answer variants" moved to Code Jail Code Blocks
     ],
     "Math Expression Input": [
         "Basic algebra (kinetic energy formula)",
         "Greek variables and trigonometric functions",
-        "Python-scripted variable generation (parallel resistors)",
+        # NOTE: "Python-scripted variable generation (parallel resistors)" moved to Code Jail Code Blocks
         "Inline LaTeX rendering in the prompt (MathJax)",
     ],
     "Problem with Adaptive Hint": [
@@ -410,18 +399,43 @@ UNITS = {
         "Language exam (dropdown + text + multiple choice)",
         "Reading comprehension with contextual grouping",
     ],
-    "Circuit Schematic Builder": [
-        "Default circuit schematic with voltage divider example",
-        "Transient analysis signal mixer requiring specific component ratios",
-        "Preloaded circuit via initial_value",
-    ],
-    "Chemical Equation Input": [
-        "Balanced chemical equation with live preview",
-        "Ionic charges with superscript preview rendering",
-    ],
     "Choice Text Input": [
         "Radio buttons with embedded numeric input (radiotextgroup)",
         "Checkboxes with embedded numeric inputs (checkboxtextgroup)",
+    ],
+    # ── Codejail-dependent (10 units) ─────────────────────────────────────────
+    # These require the Codejail sandbox (loncapa/python scripts or customresponse
+    # with cfn= graders). They are created but submission grading will fail without
+    # Codejail configured. Kept separate so they can be skipped in Step 3 testing.
+    "Code Jail Code Blocks": [
+        "Python scripting with randomization",
+        "Python scripted calculations (Pythagorean theorem)",
+        "Rerandomize on reset with scripted variables",
+        "Text input with randomized answer variants",
+        "Python-scripted variable generation (parallel resistors)",
+        "Math constraint validation (sum to expected value)",
+        "Partial credit scoring based on input percentage",
+        "Randomized parameters with dynamic math",
+        "Multi-input specific feedback per field",
+        "String logic including palindrome checking",
+    ],
+    # ── Manual testing only (12 units) ────────────────────────────────────────
+    # These require manual browser interaction — canvas drawing (schematic),
+    # image clicking (imagemap), custom JS widgets, chemical formula entry.
+    # They are created and published but cannot be auto-submitted in Step 3.
+    "Hard/Manual Testing Blocks": [
+        "Dynamic dropdown with JSON state management",
+        "Visual color picker (click interaction)",
+        "Slider math with numerical logic",
+        "Single rectangular region definition",
+        "Multiple rectangular regions (either correct)",
+        "Irregular polygon regions using coordinate points",
+        "Multiple image inputs in one problem",
+        "Default circuit schematic with voltage divider example",
+        "Transient analysis signal mixer requiring specific component ratios",
+        "Preloaded circuit via initial_value",
+        "Balanced chemical equation with live preview",
+        "Ionic charges with superscript preview rendering",
     ],
 }
 
@@ -1621,7 +1635,7 @@ R2 = random.choice([100, 200, 500, 1000])
   <p>Build a voltage divider with two 1kΩ resistors and a 10V source.</p>
   <schematicresponse>
     <center>
-      <schematic height="500" width="600" parts="resistor voltage"
+      <schematic height="500" width="600" parts="r,v"
         analyses="dc" submit_button="Check Circuit"/>
     </center>
     <answer type="loncapa/python">
@@ -1635,7 +1649,7 @@ ANSWER = answer[0][0] == 'dc'
   <p>Build an RC network with a 1kΩ resistor, 1μF capacitor, and 5V source.</p>
   <schematicresponse>
     <center>
-      <schematic height="500" width="600" parts="resistor capacitor voltage"
+      <schematic height="500" width="600" parts="r,c,v"
         analyses="tran" submit_button="Check Circuit"/>
     </center>
     <answer type="loncapa/python">
@@ -1648,7 +1662,7 @@ ANSWER = answer[0][0] == 'tran'
   <p>The schematic below should load with a 1kΩ resistor already placed on the canvas (verify the initial_value state restores). Add a 10V source to complete the circuit.</p>
   <schematicresponse>
     <center>
-      <schematic height="500" width="600" parts="resistor voltage"
+      <schematic height="500" width="600" parts="r,v"
         analyses="dc" submit_button="Check Circuit"
         initial_value='[["r",[128,48,0],{"name":"R1","r":"1k"},["1","0"]]]'/>
     </center>
@@ -1958,8 +1972,8 @@ for pass_num in range(1, MAX_PASSES + 1):
                        if b['type'] == 'vertical' and bid not in vert_children]
 
     # ── Decide action ─────────────────────────────────────────────────────────
-    if n_problems == 92 and n_verticals == 92 and n_seqs == 14 and not old_ids:
-        print("\n✓ PASS — Structure is correct: 92 problems in 92 units, 14 subsections.")
+    if n_problems == 92 and n_verticals == 92 and n_seqs == 11 and not old_ids:
+        print("\n✓ PASS — Structure is correct: 92 problems in 92 units, 11 subsections.")
         print("  Safe to proceed to Phase 8.")
         raise SystemExit(0)
 
@@ -2066,7 +2080,7 @@ Confirm `Enrolled: True`.
 
 **Structure built:**
 - 1 section: "Problem Block Testing"
-- 14 subsections (one per Problem Block type)
+- 11 subsections (9 automatable + Code Jail Code Blocks + Hard/Manual Testing Blocks)
 - 92 units with named test cases
 - 92 Problem blocks with OLX content (verified)
 - 6 static assets uploaded (3 region images, 3 jsinput widgets)
@@ -2230,8 +2244,14 @@ COURSE_ID  = "<COURSE_ID from Step 1 Phase 3>"   # e.g. course-v1:Axim+ProblemBl
 SHOTS_DIR  = "/tmp/pb_screenshots/correct"
 os.makedirs(SHOTS_DIR, exist_ok=True)
 
-SKIP_TYPES = {'jsinput', 'imageresponse', 'schematicresponse', 'chemicalequationinput',
-              'customresponse'}   # customresponse uses loncapa Python grading — skip canvas/widget types
+# Skip these response types — they require Codejail, canvas interaction, or special widgets:
+# - customresponse: loncapa/python cfn= graders (Custom Python-Evaluated Input)
+# - jsinput: custom JS widgets rendered in an iframe
+# - imageresponse: image-click grading (imageinput.js)
+# - schematicresponse: circuit canvas (schematic.js) — parts= must use single-letter codes (r,v,c…)
+# - chemicalequationinput: chemical formula entry widget
+SKIP_TYPES = {'customresponse', 'jsinput', 'imageresponse', 'schematicresponse',
+              'chemicalequationinput'}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2272,10 +2292,17 @@ def parse_answer(olx):
     except ET.ParseError:
         return {'type': 'skip', 'reason': 'XML parse error'}
 
-    # Skip hard widget types
+    # Skip hard widget types and codejail-dependent response types
     for tag in SKIP_TYPES:
         if root.find(f'.//{tag}') is not None:
             return {'type': 'skip', 'reason': tag}
+
+    # Skip loncapa/python scripted blocks — grading requires Codejail sandbox
+    # (these appear as <script type="loncapa/python"> or <answer type="loncapa/python">
+    #  inside otherwise-standard response types — SKIP_TYPES alone won't catch them)
+    for el in root.iter():
+        if el.get('type') == 'loncapa/python':
+            return {'type': 'skip', 'reason': 'loncapa/python'}
 
     actions = []
 
@@ -2503,7 +2530,7 @@ Run with: `python3 /tmp/pb_correct_submit.py`
 
 ### Step 3.2: Spot Verification (Re-Run Course)
 
-Goal: confirm the re-run course was built correctly by checking **one unit from each subsection** (14 checks total). Submit the correct answer and verify "Correct" appears.
+Goal: confirm the re-run course was built correctly by checking **one unit from each automatable subsection** (9 checks total). Submit the correct answer and verify "Correct" appears.
 
 Write `/tmp/pb_spot_verify.py` and run it:
 
@@ -2521,25 +2548,26 @@ WS_COURSE_ID = "<WS_COURSE_ID from Step 2>"  # e.g. course-v1:Axim+ProblemBlockJ
 SHOTS_DIR  = "/tmp/pb_screenshots/spot_verify"
 os.makedirs(SHOTS_DIR, exist_ok=True)
 
-# One representative unit per subsection (first unit of each)
+# One representative unit per automatable subsection (9 checks)
 SPOT_UNITS = [
     "Standard configuration with basic answers",      # Single Select
     "Standard checkbox selections (vegetables)",       # Multi-Select
     "Basic geography questions",                       # Dropdown
     "Simple math operations",                          # Numerical Input
     "Basic vocabulary synonym checking",               # Text Input
-    "Math constraint validation (sum to expected value)", # Custom Python
     "Basic algebra (kinetic energy formula)",          # Math Expression
     "Math logic riddle with trap answers",             # Adaptive Hint
     "Mixed input types (checkbox + numerical)",        # Multipart
     "Radio buttons with embedded numeric input (radiotextgroup)", # Choice Text
-    # Hard types — note as skipped
 ]
+# Skip these — require Codejail or manual canvas/widget interaction
 SPOT_SKIP = [
-    "Dynamic dropdown with JSON state management",     # Custom JS
-    "Single rectangular region definition",            # Image Mapped
-    "Default circuit schematic with voltage divider example", # Circuit
-    "Balanced chemical equation with live preview",    # Chemical Equation
+    "Python scripting with randomization",            # Code Jail — loncapa/python
+    "Math constraint validation (sum to expected value)", # Code Jail — customresponse
+    "Dynamic dropdown with JSON state management",    # Hard/Manual — jsinput
+    "Single rectangular region definition",           # Hard/Manual — imageresponse
+    "Default circuit schematic with voltage divider example", # Hard/Manual — schematic
+    "Balanced chemical equation with live preview",   # Hard/Manual — chemical
 ]
 
 # Re-use helper functions from Step 3.1 (same code)
@@ -2665,8 +2693,8 @@ WS_COURSE_ID = "<WS_COURSE_ID from Step 2>"  # e.g. course-v1:Axim+ProblemBlockJ
 SHOTS_DIR  = "/tmp/pb_screenshots/wrong"
 os.makedirs(SHOTS_DIR, exist_ok=True)
 
-SKIP_TYPES = {'jsinput', 'imageresponse', 'schematicresponse', 'chemicalequationinput',
-              'customresponse'}
+SKIP_TYPES = {'customresponse', 'jsinput', 'imageresponse', 'schematicresponse',
+              'chemicalequationinput'}
 
 # ── Helpers (same as Step 3.1) ─────────────────────────────────────────────────
 
