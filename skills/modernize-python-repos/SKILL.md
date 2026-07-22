@@ -1,15 +1,13 @@
 ---
 name: modernize-python-repos
 description: >
-  Modernize an Open edX Python repo to use uv, pyproject.toml (PEP 621/735), a src/ layout,
-  and python-semantic-release. Five modes: Implement (create the migration PR from scratch),
+  Modernize an Open edX Python repo to use uv, pyproject.toml (PEP 621/735), optional src/ layout
+  (if publishing to PyPI), and python-semantic-release. Four modes: Implement (create the migration PR from scratch),
   Re-implement (update an existing migration PR with new commits), Test/Verify (run the
-  full test suite against a PR and report every result), PR description (generate a
-  formatted PR body for a completed migration), and Separate-ruff (split ruff out of an
-  existing modernization PR into its own stacked follow-up PR). Use when asked to modernize
-  a Python package, migrate from pip-compile/setup.cfg, update a modernization PR, verify a
-  modernization PR, generate/write the PR description, or separate/split ruff out into its
-  own PR.
+  full test suite against a PR and report every result), and PR description (generate a
+  formatted PR body for a completed migration). Use when asked to modernize a Python package,
+  migrate from pip-compile/setup.cfg, update a modernization PR, verify a modernization PR,
+  or generate/write the PR description.
 allowed-tools: Read Glob Grep Bash Write Edit
 ---
 
@@ -36,9 +34,9 @@ You are helping modernize an Open edX Python package to the standard modern tool
 
 These decisions were finalized in the [#506 meeting](https://github.com/openedx/public-engineering/issues/506#issuecomment-4981671896) and define the scope of this cycle. They override any older framing:
 
-- **Ruff is OUT of scope this cycle.** It causes large auto-format diffs and review overhead, and pylint cannot be fully dropped until stricter type checking is in place. **Do not add ruff.** Retain the repo's existing lint tooling (pylint/isort/pycodestyle/pydocstyle) exactly as it is on master/main — only adapt *how* it is invoked (via uv/tox-uv). Ruff adoption is its own separate epic; splitting ruff out of a PR that already bundles it is [Mode 5](#mode-5--separate-ruff).
+- **Ruff is OUT of scope this cycle.** It causes large auto-format diffs and review overhead, and pylint cannot be fully dropped until stricter type checking is in place. **Do not add ruff.** Retain the repo's existing lint tooling (pylint/isort/pycodestyle/pydocstyle) exactly as it is on master/main — only adapt *how* it is invoked (via uv/tox-uv). Ruff adoption is its own separate epic.
 - **Any repo with a `setup.py` is in scope** — regardless of whether it publishes to PyPI. Whether a repo *should* publish to PyPI is a separate evaluation; it does not gate modernization.
-- **`src/` layout is IN scope this cycle** (precedent: `xblocks-extra`, `xblock-core`). Move the package under `src/` by default. Skip the move only if the user explicitly says to leave the layout unchanged for a given repo.
+- **`src/` layout is conditional on PyPI publishing** (best practice per [PEP 517](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/)). Apply `src/` layout **only if the repo publishes to PyPI** (i.e., a PyPI publish workflow exists on master/main). For non-PyPI repos, keep the flat layout and document the decision in the PR description. This approach balances best practices for publishable packages with practical layout simplicity for internal tools.
 - **PyPI publishing uses OIDC trusted publishing**, and the release workflow is named `release.yml` consistently across repos. The trusted publisher must be configured on PyPI before a repo can publish — that is an out-of-band prerequisite (handled by the Axim team) and a **merge blocker**, not a review blocker.
 - **`tox.ini` is added where missing**, for consistency across the org.
 - **Semantic versioning** follows the 0.x-vs-1.0+ rules (see the [zero-version guard](#releaseyml--semantic-release-gated) and Test 24): the same `pyproject.toml` config handles both via `allow_zero_version` + `major_on_zero`.
@@ -51,12 +49,10 @@ Pick the mode from the user's request. If the request doesn't clearly indicate o
 
 | Mode | When | What you do |
 |---|---|---|
-| **1. Implement** | Repo has no migration PR yet; user asks to modernize it | Create the migration from scratch: [Mode 1 workflow](#mode-1--implement), driven by the [Target state](#target-state) and verified with the [Test suite](#test-suite--tests-125) |
+| **1. Implement** | Repo has no migration PR yet; user asks to modernize it | Create the migration from scratch: [Mode 1 workflow](#mode-1--implement), driven by the [Target state](#target-state) and verified with the [Test suite](#test-suite--tests-128) |
 | **2. Re-implement** | A migration PR already exists and needs changes (review feedback, failed checks, skill updates) | Update the existing PR with **new commits only**: [Mode 2 workflow](#mode-2--re-implement) |
-| **3. Test/Verify** | User asks to test or verify a migration PR | Run all 25 tests and report every result in one table — no fixes: [Mode 3 workflow](#mode-3--testverify) |
+| **3. Test/Verify** | User asks to test or verify a migration PR | Run all 28 tests and report every result in one table — no fixes: [Mode 3 workflow](#mode-3--testverify) |
 | **4. PR description** | User asks to generate or write the PR description | Collect migration facts from the diff and produce a formatted PR body: [Mode 4 workflow](#mode-4--pr-description) |
-| **5. Separate-ruff** | A modernization PR already bundles the pylint→ruff swap and ruff must be deferred to its own PR | Leave the original PR untouched (it becomes the future ruff PR); open one new PR — `farhan/modernize-python-repo` (non-ruff, off master) — then footnote the original PR pointing at it: [Mode 5 workflow](#mode-5--separate-ruff) |
-
 All modes share the same two references below: **Target state** (what the migrated repo must look like) and the **Test suite** (how to verify it). Never restate or re-derive these per mode — they are the single source of truth.
 
 **Versioning path shorthand** used throughout: *PyPI repo* = a PyPI publish workflow exists on master/main (release gate passes); *no-PyPI repo* = no such workflow (release gate fails). Determine this once at the start and apply consistently to all versioning-related rules and tests.
@@ -81,15 +77,15 @@ Test 1 is a hard gate on this: if ruff is present, the test suite halts.
 ### pyproject.toml
 
 - **Versioning — fork based on the release gate** (same gate as [release.yml](#releaseyml--semantic-release-gated)):
-  - **No PyPI publish workflow on master/main (common case):** use a **static** `version = "<x.y.z>"` in `[project]`. Read the version from master: `git show master:<pkg>/__init__.py | grep __version__` or from `setup.cfg`'s `version =` field. `[build-system]` requires only `setuptools>=61.0` — do **not** add `setuptools-scm`. Do **not** add a `[tool.setuptools_scm]` block or `dynamic = ["version"]`.
-  - **PyPI publish workflow exists:** `[build-system]` uses `setuptools>=61.0` and `setuptools-scm>=8.0`; `dynamic = ["version"]` only (not `["dependencies"]`); `[tool.setuptools_scm]` has `version_scheme = "only-version"` and `local_scheme = "no-local-version"`. Do **not** set `root` unless the Python package lives in a subdirectory.
+  - **No PyPI publish workflow on master/main (common case):** use a **static** `version = "<x.y.z>"` in `[project]`. Read the version from master: `git show master:<pkg>/__init__.py | grep __version__` or from `setup.cfg`'s `version =` field. `[build-system]` requires only `setuptools` (no version specifier) — do **not** add `setuptools-scm`. Do **not** add a `[tool.setuptools_scm]` block or `dynamic = ["version"]`.
+  - **PyPI publish workflow exists:** `[build-system]` uses `setuptools` (no version specifier) and `setuptools-scm>=8.0`; `dynamic = ["version"]` only (not `["dependencies"]`); `[tool.setuptools_scm]` has `version_scheme = "only-version"` and `local_scheme = "no-local-version"`. Do **not** set `root` unless the Python package lives in a subdirectory.
 - `[project]` has all metadata: name, description, readme, requires-python, license (SPDX string), authors, classifiers, keywords, urls
 - `classifiers` includes Django framework classifiers: `Framework :: Django`, `Framework :: Django :: 4.2`, `Framework :: Django :: 5.2`
 - `dependencies` is a **static list** (not dynamic from a requirements file)
 - `[tool.uv]` has `package = true`
 - `[dependency-groups]` covers: `test-base`, `test`, `quality`, `doc`, `ci`, `dev` — plus version-matrix groups (e.g. `django42`, `django52`) only when needed. The `quality` group keeps the repo's existing linters (pylint/isort/pycodestyle/pydocstyle, plus mypy if present) — it does **not** gain ruff.
 - `[tool.uv].conflicts` lists the mutually exclusive Django version groups
-- **Package discovery — `src/` layout:** `[tool.setuptools.packages.find]` has `where = ["src"]` and keeps the repo's `exclude` patterns (see [Package layout](#package-layout--src)).
+- **Package discovery — conditional on layout:** If the repo publishes to PyPI and uses `src/` layout, `[tool.setuptools.packages.find]` has `where = ["src"]` and keeps the repo's `exclude` patterns (see [Package layout](#package-layout--src)). If the repo does not publish to PyPI or uses a flat layout, omit the `where` clause so `setuptools` searches the repo root.
 - **Constraints** — migrated from `requirements/constraints.txt` if it existed on master/main:
   1. Read the old file: `git show master:requirements/constraints.txt` (or `main`).
   2. Identify any **repo-specific** pins — lines that are not `-c …` includes and not comments. If only a `-c common_constraints.txt` include exists, there are no repo-specific overrides.
@@ -111,18 +107,26 @@ Test 1 is a hard gate on this: if ruff is present, the test suite halts.
   ```
   If the output is `v0.x.y` (or empty — no release tags yet), add both settings. If the output is `v1.x.y` or higher, omit them.
 - **`docs/` exclusion:** check whether main/master was already packaging `docs/` (base branch's `pyproject.toml` packages config, `MANIFEST.in`, `setup.cfg`). If it was, preserve that; if not (the common case), ensure `docs/` is excluded — add `"docs*"` to `exclude` under `[tool.setuptools.packages.find]` if needed. Never introduce `docs/` packaging where it didn't exist.
-- **`__version__` in `__init__.py`:** Do not define `__version__` in any `__init__.py` regardless of the versioning path. The version is owned by `pyproject.toml` in both cases. For PyPI repos, if `__version__` is genuinely needed at runtime use the `importlib.metadata` pattern shown in Test 15. For no-PyPI repos, simply omit it — there is no reason to re-expose the static version through `__init__.py`.
+- **`__version__` in `__init__.py`:** Do not define `__version__` in any `__init__.py` regardless of the versioning path. The version is owned by `pyproject.toml` in both cases. For PyPI repos, if `__version__` is genuinely needed at runtime use the `importlib.metadata` pattern shown in Test 13. For no-PyPI repos, simply omit it — there is no reason to re-expose the static version through `__init__.py`.
 
 ### Package layout — src/
 
-The importable package moves under a `src/` directory (in scope this cycle; precedent: `xblocks-extra`, `xblock-core`). **Default: perform the move.** Skip only if the user explicitly says to leave the layout unchanged for this repo.
+The importable package may move under a `src/` directory. **Apply `src/` layout only if the repo publishes to PyPI** (i.e., a PyPI publish workflow exists on master/main and the release gate passes). For repos that do not publish to PyPI, keep the default flat layout and document this decision in the PR description.
 
+**Rationale:** `src/` layout is a best practice for publishable packages on PyPI (per [PEP 517](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/)). For non-published packages (especially those with complex internal tooling or non-standard import structures), a flat layout may be simpler and equally valid. The layout choice should match the package's distribution intent.
+
+**When to apply `src/` layout (PyPI publishing repo):**
 - Move the package with history preserved: `git mv <pkg> src/<pkg>` (repeat for multiple top-level packages).
 - Do **not** move `tests/` if master ran them from the repo root — match the reference repo's choice. Only move a `tests/` dir if it lived inside the package.
 - `[tool.setuptools.packages.find]` → `where = ["src"]`, keep the existing `exclude` patterns.
 - Coverage config points at the package so it is measured under `src/` (see the coverage bullet above).
 - Update any hardcoded references to the old top-level package path in `tox.ini`, `Makefile`, `MANIFEST.in`, docs `conf.py`, and CI.
 - If the repo already uses a `src/` layout, this is a no-op — confirm and move on.
+
+**When to skip `src/` layout (non-PyPI repo):**
+- Leave the package at the top level (existing layout).
+- Set `[tool.setuptools.packages.find]` without a `where` clause (searches the repo root).
+- Document in the PR description under "## Not included/implemented" why `src/` layout was not adopted (e.g., "repo does not publish to PyPI; flat layout retained for simplicity").
 
 ### Files to delete
 
@@ -132,7 +136,7 @@ The importable package moves under a `src/` directory (in scope this cycle; prec
 - `CHANGELOG.rst` — **only if the release gate passes** (PyPI publish workflow exists and semantic-release is being added). For no-PyPI repos, **keep `CHANGELOG.rst`** — there is no automated release-notes alternative and deleting it removes the only release history record.
 - `.coveragerc` (config moves into pyproject.toml)
 
-**Do NOT delete** `pylintrc` or `pylintrc_tweaks` — ruff is out of scope, so pylint stays. (These are only removed by [Mode 5](#mode-5--separate-ruff) when ruff is adopted in its own PR.)
+**Do NOT delete** `pylintrc` or `pylintrc_tweaks` — ruff is out of scope, so pylint stays.
 
 ### tox.ini
 
@@ -167,7 +171,7 @@ The importable package moves under a `src/` directory (in scope this cycle; prec
 - `uv sync --group ci` then `uv run tox -e ${{ matrix.toxenv }}`
 - **CI parity with master/main.** Every test, lint, or tool that ran in the old CI (Table B in Step 1) must have a corresponding tox env in the new CI matrix — including the pylint/quality checks, `mypy` if the repo used it, and `docs` if a docs build ran. Gaps are regressions.
 - **Consolidate a standalone `tests` job into `run_tests`** when its only extra step is Codecov upload: add `py312-test` to the `toxenv` matrix and gate the upload with `if: matrix.toxenv == 'py312-test'`. Do not preserve a separate job just for Codecov. Multi-OS expansion via a separate `os` matrix is not a requirement unless explicitly asked for. Exception: branch protection (next bullet).
-- **Branch protection check names are preserved.** Before restructuring CI jobs, check the required status checks: `gh api repos/<org>/<repo>/branches/master/protection --jq '.required_status_checks.checks'`. GitHub generates check names as `<job.name> (<matrix-val1>, <matrix-val2>)` when a matrix is used — renaming a job or changing its matrix breaks the required check silently (it shows as "not run", permanently blocking the PR). If a check like `Tests (ubuntu-latest, 3.12)` is required, split the test env into a dedicated job with the old `name:` and old matrix dimensions so the exact string is reproduced (see Test 17 for the YAML). Admin access to update branch protection is not always available on Open edX repos; prefer preserving the check name.
+- **Branch protection check names are preserved.** Before restructuring CI jobs, check the required status checks: `gh api repos/<org>/<repo>/branches/master/protection --jq '.required_status_checks.checks'`. GitHub generates check names as `<job.name> (<matrix-val1>, <matrix-val2>)` when a matrix is used — renaming a job or changing its matrix breaks the required check silently (it shows as "not run", permanently blocking the PR). If a check like `Tests (ubuntu-latest, 3.12)` is required, split the test env into a dedicated job with the old `name:` and old matrix dimensions so the exact string is reproduced (see Test 15 for the YAML). Admin access to update branch protection is not always available on Open edX repos; prefer preserving the check name.
 
 ### release.yml + semantic-release (gated)
 
@@ -184,7 +188,7 @@ Look for any workflow whose name contains `pypi`, `publish`, or `release`, or a 
 If a publish workflow **did** exist, replace it with `release.yml` (named exactly `release.yml`, consistently across repos):
 - `run_tests` (or `run_ci`) job calls the CI workflow as a reusable workflow, with `secrets: inherit` and `permissions: contents: read`
 - `release` job: checkout + `git reset --hard ${{ github.sha }}` + PSR action (SHA-pinned, `changelog: "false"`); `permissions: contents: write` only (no `id-token` on this job); no `setup-uv` step — PSR does not need uv, `build_command` handles everything via pip
-- `publish_to_pypi` job: **OIDC trusted publishing.** Use `permissions: id-token: write` and `pypa/gh-action-pypi-publish` with **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`. This is the org-wide decision for this cycle (#506), applied even if master used token auth.
+- `publish_to_pypi` job: **OIDC trusted publishing — unconditionally.** Use `permissions: id-token: write` and `pypa/gh-action-pypi-publish` with **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`. **Never copy token auth from master or from the source PR** — the switch to OIDC is the org-wide decision for this cycle (#506) and applies regardless of what master used, regardless of what the original PR used, and regardless of any "parity with master" principle. Token auth (`PYPI_UPLOAD_TOKEN`) must not appear anywhere in the new `release.yml`.
   - **Out-of-band prerequisite / merge blocker:** OIDC requires a trusted publisher pre-configured on the PyPI project page (PyPI project → *Publishing* → *Add a new publisher*, pointing at `openedx/<repo>`, workflow `release.yml`, no environment). The Axim team (Feanil) enables these. Until it is confirmed, the PR **must not be merged** — the first publish would silently fail after semantic-release has already tagged and bumped the version. Flag this in the PR description `## Code reviewer notes` and confirm with the maintainer before merge.
   - After the switch, the old `PYPI_UPLOAD_TOKEN` secret can be removed from the repo (out-of-band, note it — do not attempt it from the migration).
   - `pypa/gh-action-pypi-publish` SHA-pinned.
@@ -211,7 +215,7 @@ Do not introduce any file, setting, threshold, or configuration that is not pres
 
 These items look like gaps when comparing two repos but are **not in scope** and should not be changed:
 
-- **Ruff adoption** — deferred to its own epic this cycle (see [Cycle decisions](#cycle-decisions-public-engineering506-meeting)). Do not add ruff. If a PR already bundles ruff, use [Mode 5](#mode-5--separate-ruff) to split it out.
+- **Ruff adoption** — deferred to its own epic this cycle (see [Cycle decisions](#cycle-decisions-public-engineering506-meeting)). Do not add ruff. If a PR already bundles ruff, revert the ruff changes before proceeding.
 - **`django` upper bound in `[project].dependencies`** — e.g. `"django>=4.2"` without `<6.0` — downstream constraint management is out of scope
 - **MANIFEST.in philosophy** — inclusion-based vs exclusion-based depends on the repo's file layout; do not normalize this (but do fix package paths that changed due to the `src/` move)
 - **CI workflow file name** — `python-tests.yml` vs `ci.yml` is cosmetic; do not rename unless explicitly asked
@@ -236,6 +240,8 @@ Apply in Implement and Re-implement modes:
 ---
 
 ## Mode 1 — Implement
+
+> **Least-change principle:** Only do what is in scope for this migration story. Do not fix unrelated issues, refactor pre-existing code, reorder unchanged content, or add improvements beyond what the Target state requires. Every line changed should be traceable to a specific requirement in this skill or the parent story.
 
 Create the migration PR from scratch. Work through these steps in order; the [Target state](#target-state) defines what each file must look like.
 
@@ -274,17 +280,17 @@ Files to read:
 
 **Also produce two inventory tables before touching any files:**
 
-**Table A — Makefile targets (current state):** every `make` target, what tool it invokes, and whether that tool is being removed by this migration (only pip-compile/setup.py targets are). Baseline for the Makefile audit and Test 16.
+**Table A — Makefile targets (current state):** every `make` target, what tool it invokes, and whether that tool is being removed by this migration (only pip-compile/setup.py targets are). Baseline for the Makefile audit and Test 14.
 
-**Table B — CI steps (current state):** every step in the existing CI workflow and what it runs. Baseline for CI parity and Test 16.
+**Table B — CI steps (current state):** every step in the existing CI workflow and what it runs. Baseline for CI parity and Test 14.
 
 ### Step 2 — Consolidate package metadata into pyproject.toml
 
 Goal: single `pyproject.toml` per the [pyproject.toml target state](#pyprojecttoml) (metadata, static dependencies, versioning, coverage, lint tooling retained), remove any `__version__` from `__init__.py`, and delete the [files to delete](#files-to-delete) (`setup.py`, `setup.cfg`, `CHANGELOG.rst` per gate, `.coveragerc`). Keep `pylintrc`/`pylintrc_tweaks`. Apply the versioning fork: static `version =` in `[project]` when no PyPI publish workflow exists; `setuptools-scm` + `dynamic = ["version"]` when one does.
 
-### Step 2b — Adopt the src/ layout
+### Step 2b — Adopt the src/ layout (if PyPI publishing repo)
 
-Move the package under `src/` per [Package layout](#package-layout--src), unless the user explicitly asked to leave the layout unchanged. Use `git mv <pkg> src/<pkg>`, set `where = ["src"]` in `[tool.setuptools.packages.find]`, fix coverage config, and update any hardcoded paths in tox/Makefile/MANIFEST/docs/CI.
+Check the release gate (does a PyPI publish workflow exist on master/main?). If yes, move the package under `src/` per [Package layout](#package-layout--src): `git mv <pkg> src/<pkg>`, set `where = ["src"]` in `[tool.setuptools.packages.find]`, fix coverage config, and update any hardcoded paths in tox/Makefile/MANIFEST/docs/CI. If no (non-PyPI repo), keep the flat layout and proceed to the next step, noting the decision for the PR description.
 
 ### Step 3 — Switch dependency management from pip-compile to uv
 
@@ -296,7 +302,7 @@ Run the gate check in the [release.yml target state](#releaseyml--semantic-relea
 
 ### Step 5 — Verify
 
-Re-run the Step 1 status checklist and confirm every item is ✅ Done. Flag any items that require out-of-band action (e.g. configuring the PyPI trusted publisher). Then run the full [Test suite](#test-suite--tests-125) — all tests must pass (fixing root causes as needed) before reporting the migration as done. Report the results as one table per the [reporting format](#reporting-format).
+Re-run the Step 1 status checklist and confirm every item is ✅ Done. Flag any items that require out-of-band action (e.g. configuring the PyPI trusted publisher). Then run the full [Test suite](#test-suite--tests-128) — all tests must pass (fixing root causes as needed) before reporting the migration as done. Report the results as one table per the [reporting format](#reporting-format).
 
 ### Step 6 — PR description
 
@@ -310,7 +316,9 @@ After the PR is created and commits are pushed, wait 3 minutes for CI checks to 
 
 ## Mode 2 — Re-implement
 
-Update an existing migration PR. History is append-only: all changes land as **new commits** — never amend, rebase, squash, or force-push the branch. This holds for every mode: even [Mode 5](#mode-5--separate-ruff) leaves the original branch untouched and does its split on two brand-new branches.
+> **Least-change principle:** Only do what is in scope for this migration story. Address the specific review feedback, failing checks, or skill-driven gaps identified in Step 2 — nothing more. Do not fix unrelated issues, refactor pre-existing code, or add improvements beyond what was requested or required.
+
+Update an existing migration PR. History is append-only: all changes land as **new commits** — never amend, rebase, squash, or force-push the branch.
 
 ### Step 1 — Identify the PR
 
@@ -329,7 +337,7 @@ Sources of required changes, in priority order:
 1. Explicit instructions from the user
 2. Reviewer comments / requested changes on the PR
 3. Failing CI checks
-4. Drift from the current [Target state](#target-state) (e.g. the skill was updated since the PR was made) — run the relevant tests from the [Test suite](#test-suite--tests-125) to find gaps
+4. Drift from the current [Target state](#target-state) (e.g. the skill was updated since the PR was made) — run the relevant tests from the [Test suite](#test-suite--tests-128) to find gaps
 
 List the planned changes before making them.
 
@@ -341,7 +349,7 @@ List the planned changes before making them.
 
 ### Step 4 — Re-verify
 
-Run the tests from the [Test suite](#test-suite--tests-125) that cover the areas you touched — or the full suite if the changes were broad. Fix any failures (per Process rule 7) before finishing. Report results as one table per the [reporting format](#reporting-format).
+Run the tests from the [Test suite](#test-suite--tests-128) that cover the areas you touched — or the full suite if the changes were broad (Test 21 is gated — skip unless explicitly requested). Fix any failures (per Process rule 7) before finishing. Report results as one table per the [reporting format](#reporting-format).
 
 ### Step 5 — Update the PR description
 
@@ -363,11 +371,11 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-131), in order, Test 1 through Test 31.
+Run **all** tests from the [Test suite](#test-suite--tests-128), in order, Test 1 through Test 28.
 
-**Test 1 is a hard gate.** If ruff is present, Test 1 fails: **stop running the remaining tests**, report only Test 1's failure, and follow its instructions (ask the user to drop the ruff implementation or split it via [Mode 5](#mode-5--separate-ruff), then re-run). Do not report the other tests as passed or failed when Test 1 halts — record them as `⏭️ Skipped (halted at Test 1 — ruff present)`.
+**Test 1 is a hard gate.** If ruff is present, Test 1 fails: **stop running the remaining tests**, report only Test 1's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 1 halts — record them as `⏭️ Skipped (halted at Test 1 — ruff present)`.
 
-Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 20 when the release gate excluded release.yml, Test 8 or Test 22 based on the versioning path, Test 23 when no PR has been opened yet, Test 24 when the release gate excluded release.yml, Test 25 when the user opted out of the src/ move, Tests 27/31/32 when the release gate excluded release.yml). Record the outcome of every single test.
+Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 8 when no PyPI publish workflow exists, Test 11 always (gated — only runs on explicit user request), Test 18 when the release gate excluded release.yml, Test 20 when a PyPI publish workflow exists, Test 21 always (gated — only runs on explicit user request), Test 22 when the user opted out of the src/ move, Test 23 when master did not use mypy, Test 24 when the release gate excluded release.yml). Record the outcome of every single test.
 
 ### Step 3 — Report
 
@@ -379,7 +387,7 @@ Used whenever test results are reported (all modes). Rules:
 
 - **One table, all tests.** Every test appears as a row, identified as `Test#XX`. Do **not** split passing and failing results into separate tables, and do **not** omit any test — passes, failures, and skips are all listed.
 - Result values: `✅ Pass`, `❌ Fail`, `⏭️ Skipped (<reason>)`, `🛑 Halt` (Test 1 only), `ℹ️ Info` (Test 14 only). A skip without a reason is not allowed.
-- After the table, add a detail section **per failed test** (what failed, the evidence/output, what would fix it), Test 14's informational notes, Test 22's versioning path note (skip reason or pass evidence), and Test 23's PR description check (skippable if no PR has been opened yet).
+- After the table, add a detail section **per failed test** (what failed, the evidence/output, what would fix it), Test 12's informational notes, and Test 20's versioning path note (skip reason or pass evidence). Tests 11 and 21 are gated and appear in the table only as `⏭️ Skipped` unless the user explicitly asked for them.
 
 Template:
 
@@ -390,12 +398,13 @@ Template:
 |---|---|---|---|
 | Test#01 | Ruff absence gate | ✅ Pass | no ruff present |
 | Test#02 | Make targets | ✅ Pass | all targets exit 0 |
-| Test#03 | Package build and tarball contents | ✅ Pass | |
+| Test#03 | Package build and distribution contents | ✅ Pass | |
 | Test#04 | Lockfile consistency | ❌ Fail | uv lock --check exits 1 |
 | ... | ... | ... | ... |
-| Test#22 | Static versioning parity | ⏭️ Skipped (PyPI publish workflow exists — setuptools-scm used) | |
-| Test#23 | PR description completeness | ⏭️ Skipped (no PR opened yet) | |
-| Test#25 | src/ layout | ✅ Pass | package under src/<pkg> |
+| Test#11 | SHA pinning audit | ⏭️ Skipped (gated — run explicitly to check SHA pinning) | |
+| Test#20 | Static versioning parity | ⏭️ Skipped (PyPI publish workflow exists — setuptools-scm used) | |
+| Test#21 | PR description completeness | ⏭️ Skipped (gated — run explicitly to check PR description) | |
+| Test#22 | src/ layout | ✅ Pass | (PyPI repo) package under src/<pkg> — OR — (non-PyPI repo) flat layout retained, documented in PR |
 
 ## Failure details
 
@@ -476,156 +485,18 @@ git diff master...HEAD -- .github/workflows/
 
 Use the template in [PR description format](#pr-description-format). Apply these content accuracy rules — each maps a Step 1 fact to what goes in the description:
 
-- **Summary headline:** include `+ python-semantic-release` only if `release.yml: PRESENT` in Step 1.
-- **`[- Move package into a src/ layout]` bullet:** include only if `src/ layout: PRESENT`.
+- **Summary headline:** include `+ src/ layout` only if the repo publishes to PyPI (release gate passes) and the layout was moved. Include `+ python-semantic-release` only if `release.yml: PRESENT`.
+- **`[- Move package into a src/ layout]` bullet:** include only if `src/ layout: PRESENT` (i.e., the layout move happened).
 - **`[- Add python-semantic-release + release.yml (OIDC publishing)]` bullet:** include only if `release.yml: PRESENT`.
 - **`[- Add commitlint.yml ...]` bullet:** include only if `release.yml: PRESENT`. Always pair with a `## Code reviewer notes` bullet warning that conventional commit format is now enforced on all future PRs.
 - **`CHANGELOG.rst` in deleted files line:** include only if `release.yml: PRESENT` (release gate passed). Omit from the deleted files list for no-PyPI repos — it was kept.
 - **`[- Drop Python X.Y support]` bullet:** include only if `requires-python` changed vs master.
 - **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
 - **Removed Makefile targets table:** populate from the `=== Targets removed ===` list only. Any target in `=== Targets kept ===` must not appear in this table, even if its implementation was rewritten.
-- **`## Not included` section:** present if and only if `release.yml: ABSENT`. Omit entirely if `release.yml: PRESENT`.
+- **`## Not included/implemented` section:** present if and only if `release.yml: ABSENT` OR `src/ layout: ABSENT`. Omit entirely if both are present. For repos that do not publish to PyPI and did not move to `src/` layout, include a bullet explaining the decision (e.g., "repo does not publish to PyPI; flat layout retained").
 - **`## Python X.Y dropped` section:** present if and only if `requires-python` changed vs master. Omit otherwise.
 - **Versioning section:** write the `[Static]` paragraph if no `setuptools-scm` in `pyproject.toml`; write the `[Dynamic]` paragraph if `setuptools-scm` is present. Write exactly one, never both.
 - **OIDC note:** if `release.yml: PRESENT`, add a `## Code reviewer notes` bullet flagging the PyPI trusted-publisher (OIDC) config as an out-of-band merge blocker.
-
----
-
-## Mode 5 — Separate-ruff
-
-Create one new clean PR from an existing modernization PR that bundles ruff, leaving the original PR untouched. Use when a modernization PR already bundles the pylint→ruff swap and ruff must be deferred to its own epic — per the [public-engineering#506 meeting decision](https://github.com/openedx/public-engineering/issues/506#issuecomment-4981671896): *"Ruff is out of scope for this cycle … Any ruff-related changes already in current PRs should be reverted or moved out. Ruff adoption will be its own separate epic."*
-
-**End state:**
-- The **original PR is never modified** — its branch, commits, and diff stay exactly as they are. It remains open and will serve as the future ruff adoption PR when that epic begins; only its description gets a footer note pointing at the new non-ruff PR.
-- A new PR on branch **`farhan/modernize-python-repo`**, **cut from the latest `master`/`main`**, contains every modernization change **except** ruff; its lint tooling stays exactly as master/main (pylint/isort/pycodestyle/pydocstyle untouched).
-
-**This mode never rewrites history and never force-pushes.** The original branch is read-only here; the new branch is cut fresh from master. This keeps the append-only rule in [Mode 2](#mode-2--re-implement) intact.
-
-### What counts as "ruff" (the split boundary)
-
-Everything in the left column stays in the **original PR** (which becomes the future ruff PR). Everything else goes into the **new non-ruff `farhan/modernize-python-repo` PR**.
-
-| Ruff-owned (stays in original PR, future ruff epic) | Non-ruff PR (as master had it) |
-|---|---|
-| `[tool.ruff]`, `[tool.ruff.lint]`, `[tool.ruff.lint.isort]`, `[tool.ruff.format]` in `pyproject.toml` | pyproject metadata, `dependencies`, `[dependency-groups]`, versioning, `[tool.coverage.*]`, `[tool.uv]`, `src/` layout |
-| `ruff` added to the `quality` dependency group | `pylint`/`isort`/`pycodestyle`/`pydocstyle` kept in the quality group exactly as master |
-| Deletion of `pylintrc`, `pylintrc_tweaks` | `pylintrc`, `pylintrc_tweaks` retained (as master had them) |
-| tox `quality`/`lint` env invoking `ruff check` / `ruff format` | tox lint/quality env keeps master's pylint/isort/pycodestyle invocation |
-| Makefile `lint` switched to ruff, and any net-new `format` target running ruff | Makefile lint/quality/style targets keep master's pylint-based commands; `requirements`/`upgrade`/`test`/`docs` stay |
-| CI matrix `quality`/`lint` toxenv that runs ruff | CI keeps master's lint step |
-| `# pylint: disable=unused-import` → `# noqa: F401` translations | pylint suppression directives kept as-is (still pylint era) |
-| Every ruff auto-format hunk in `*.py` (quote style, import sort, whitespace, line wrapping) | `*.py` files kept at master's formatting; genuine non-format modernization edits (e.g. `__version__` handling, src/ move) stay |
-
-Rule of thumb: **anything master already had goes to the non-ruff PR unchanged; anything that exists only to serve ruff stays in the original PR.** uv, tox-uv, SHA-pinning, semantic-release, commitlint, the Python-version drop, and the src/ layout are **not** ruff — they belong in the non-ruff PR.
-
-### Step 1 — Identify the original PR and capture state
-
-Ask for the PR if the user did not specify one. Then (read-only against the original branch):
-
-```bash
-gh pr view <number> --json number,title,headRefName,baseRefName,body,url
-gh pr checkout <number>
-BASE=$(gh pr view <number> --json baseRefName --jq '.baseRefName')     # master or main
-ORIG_BRANCH=$(gh pr view <number> --json headRefName --jq '.headRefName')
-git fetch origin "$BASE"
-ORIG=$(git rev-parse HEAD)          # original PR head — read-only reference
-MERGE_BASE=$(git merge-base "origin/$BASE" HEAD)
-echo "orig-branch=$ORIG_BRANCH base=$BASE orig=$ORIG merge-base=$MERGE_BASE"
-```
-
-Confirm the PR actually contains ruff (`grep -q 'tool\.ruff' pyproject.toml`). If it does not, stop — there is nothing to split.
-
-Note the branch name this mode creates (fixed):
-
-```bash
-NONRUFF_BRANCH=farhan/modernize-python-repo   # cut from origin/$BASE, holds everything except ruff
-```
-
-### Step 2 — Build the non-ruff branch
-
-Build the new branch from the latest base. The original branch (`$ORIG_BRANCH`) is **never checked out for writing, reset, or pushed** in this mode.
-
-**Non-ruff branch (`farhan/modernize-python-repo`), cut from the latest base:**
-
-```bash
-git checkout -B "$NONRUFF_BRANCH" "origin/$BASE"   # fresh branch off latest master/main
-git read-tree -u --reset "$ORIG"                   # worktree == full original PR (ruff included) as a starting point
-```
-
-Now transform the working tree so ruff is gone and lint tooling matches master, using the split table above:
-
-```bash
-# Restore ruff-owned files that master owned differently
-git checkout "origin/$BASE" -- pylintrc pylintrc_tweaks 2>/dev/null || true
-# For every *.py that differs from master ONLY by ruff formatting, restore master's copy;
-# for a *.py with a genuine non-format edit, hand-edit to drop only the format hunks and keep the edit.
-git diff "origin/$BASE" -- '*.py'
-# Edit pyproject.toml: remove [tool.ruff*]; restore master's quality group (pylint/isort/…); drop `ruff`.
-# Edit tox.ini / Makefile / CI: restore master's lint/quality/style commands.
-```
-
-Confirm the non-ruff branch reproduces master's lint behavior (pylint, not ruff), then commit:
-
-```bash
-uv run tox -e quality   # or the repo's lint target — must behave as on master (pylint)
-git add -A
-git commit -m "<original PR's subject — with any ruff mention removed from the body>"
-NONRUFF_HEAD=$(git rev-parse HEAD)
-```
-
-### Step 3 — Show the branch for review
-
-```bash
-echo "=== Non-ruff branch ($NONRUFF_BRANCH, base $BASE) ==="; git show "$NONRUFF_HEAD" --stat
-echo "=== What stays in original PR (ruff-only delta) ==="; git diff "$NONRUFF_HEAD" "$ORIG" --stat
-```
-
-Summarize for the user: what landed in the non-ruff branch, what stays in the original PR (the ruff changes), and confirm pylint config is retained as on master. Note explicitly that the original branch/PR has not been touched.
-
-### Step 4 — Verification checkpoint (blocking)
-
-Ask the user exactly: **"Verified (y/n)?"** and stop.
-
-Do **not** push or open a PR until the user answers `y`. On `n`, collect what's wrong and rebuild the branch (return to Step 2). (Nothing has been pushed and the original branch is untouched, so a rebuild is always safe.)
-
-### Step 5 — Push the new branch and open the PR
-
-Only after the user answers `y`:
-
-```bash
-git push -u origin "$NONRUFF_BRANCH"
-
-# Non-ruff PR — based on master/main
-gh pr create --base "$BASE" --head "$NONRUFF_BRANCH" \
-  --title "<original PR's title — without ruff>" \
-  --body-file /tmp/nonruff_pr_body.md
-```
-
-The original PR keeps its own base and diff — untouched. It will serve as the ruff adoption PR in a future epic.
-
-### Step 6 — Write descriptions and cross-link
-
-**Non-ruff PR description** — use the standard [PR description format](#pr-description-format), with ruff removed: no "replace pylint/isort with ruff" bullet, no `pylintrc`/`pylintrc_tweaks` deletion, and a note that pylint is retained exactly as on master. Near the top, add: `Split out of <original-PR-link>; ruff retained there for adoption in a future epic (per public-engineering#506).`
-
-**Update the original PR — description footer only, no code changes.** Append (do not remove existing content) a note at the **end** of the original PR body via `gh pr edit <original-number> --body-file /tmp/orig_pr_body.md`:
-
-```
----
-
-The non-ruff modernization work has been extracted into a focused PR per the decision in the main story ([public-engineering#506](https://github.com/openedx/public-engineering/issues/506#issuecomment-4981671896)):
-
-- Modernization (no ruff): <non-ruff-PR-link>
-
-This PR retains the ruff adoption and can be rebased onto `farhan/modernize-python-repo` once that lands, to serve as the ruff epic PR.
-```
-
-Leave the original PR **open**; do not close, force-push, or otherwise modify its branch.
-
-**Cross-linking:** the original PR footer links to the non-ruff PR; the non-ruff PR links back to the original. Optionally post a short comment on the original PR pointing at the new non-ruff PR.
-
-### Step 7 — Fix CI checks
-
-After the new PR is created and commits are pushed, wait 3 minutes for CI checks to initialize, then invoke the `/fix-checks` skill to make any failing checks green.
 
 ---
 
@@ -639,13 +510,13 @@ This is the authoritative template used by Mode 1 Step 6, Mode 2 Step 5, and Mod
 
 ## Summary
 
-Modernize `<repo-name>` to uv + pyproject.toml (PEP 621/735) + src/ layout[+ python-semantic-release].
+Modernize `<repo-name>` to uv + pyproject.toml (PEP 621/735)[+ src/ layout][+ python-semantic-release].
 
 Part of https://github.com/openedx/public-engineering/issues/506.
 
 - Replace `setup.py`/`setup.cfg` with `pyproject.toml` (PEP 621 static metadata)
 - Switch from pip-compile to `uv` with PEP 735 dependency groups; commit `uv.lock`
-- Move the package into a `src/` layout   ← include only if the src/ move was done
+[- Move the package into a `src/` layout]   ← include only if the src/ move was done (repo publishes to PyPI)
 - Retain pylint/isort/pycodestyle as on master (ruff deferred to its own epic per #506); coverage config moved into `pyproject.toml`
 - Update `tox.ini` to use `tox-uv` with `uv-venv-lock-runner`
 - Update CI to use `astral-sh/setup-uv`; SHA-pin all actions; add `workflow_call` trigger
@@ -668,8 +539,11 @@ Part of https://github.com/openedx/public-engineering/issues/506.
 ## Python X.Y dropped   [← only when requires-python was bumped]
 Python X.Y reached end-of-life on <date> and Open edX <release> dropped it platform-wide. Removed from the tox envlist, CI matrix, and classifiers.
 
-## Not included   [← only when release gate failed]
-`release.yml` / `python-semantic-release` — master had no PyPI publish workflow.
+## Not included/implemented   [← when release gate failed OR src/ move was skipped]
+<!-- include one bullet per omitted item; omit entire section if nothing was skipped -->
+- `release.yml` / `python-semantic-release` — master had no PyPI publish workflow.   [← only when release gate failed]
+- `src/` layout — package remains at the top level; repo does not publish to PyPI, so flat layout was retained for simplicity.   [← only when src/ move was skipped for non-PyPI repo]
+- `src/` layout — <reason the move was skipped, e.g. "user explicitly requested no layout change for this repo">.   [← only if user explicitly opted out despite PyPI publishing]
 
 <!-- END CONDITIONAL SECTIONS -->
 
@@ -702,13 +576,31 @@ This PR has not been manually tested against the repo's own features. Testing re
 - The 🤖 footer is always present, separated by `---`.
 - **No repeated content:** every claim must appear in exactly one section. Before writing any bullet, verify it is not already conveyed elsewhere in the description.
 - **Accuracy over completeness:** every claim in the description must be true of this specific PR. Never write a conditional item (bracketed or conditional section) unless its condition was confirmed true in Mode 4 Step 1. When in doubt, omit rather than guess.
-- **Never mention ruff** as part of this migration — it is out of scope. If ruff was split out via Mode 5, the non-ruff PR description links the ruff follow-up PR instead.
+- **Never mention ruff** as part of this migration — it is out of scope.
 
 ---
 
-## Test suite — Tests 1–31
+## Test suite — Tests 1–28
 
 All tests must be run before a migration is reported as done (Implement/Re-implement) or as part of a verification report (Test/Verify). Failure handling per mode is Process rule 7: fix in Implement/Re-implement, report-only in Test/Verify. **Test 1 is a hard gate — if it fails, halt.**
+
+**Test groups** (tests are numbered in order of execution, not by group):
+
+| Group | Tests | What they check |
+|---|---|---|
+| Entry gate (run first) | 1 | Ruff absent everywhere |
+| Python version | 26 | Python < 3.12 removed from tox, CI, classifiers |
+| Package structure and files | 9, 13, 22 | Stale files deleted; `__version__` removed; src/ layout correct |
+| Package build | 3, 7, 8 | Build output complete; package imports; setuptools-scm runtime (PyPI) |
+| Dependency management | 4, 5, 16, 17, 27 | Lockfile in sync; groups resolve; all packages migrated; constraints; static deps |
+| Versioning | 20, 24 | Static version matches master (no-PyPI); versioning strategy configuration |
+| Quality tooling | 23, 28 | Mypy retained (if used); quality group has original linters |
+| Tox configuration | 6 | tox.ini parses; all envs resolve |
+| Makefile | 2, 14 | Targets exit 0; no target dropped without reason |
+| GitHub Actions and CI | 10, 15, 18, 25 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox` |
+| Code review audit | 12, 19 | Logic changes noted; no invented thresholds |
+| PR documentation (gated) | 21 | PR body complete and accurate (explicit request only) |
+| SHA pinning audit (gated) | 11 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
 
 ### Test 1 — Ruff absence gate (HALT on failure)
 
@@ -720,15 +612,13 @@ grep -nE '\[tool\.ruff' pyproject.toml || echo "(none)"
 echo "=== ruff as a dependency ==="
 grep -rnE '(^|[^a-z])ruff([^a-z]|$)' pyproject.toml uv.lock tox.ini Makefile .github/workflows/ 2>/dev/null \
   | grep -iE 'ruff' | grep -vE 'ruffle|scruff' || echo "(none)"
-echo "=== pylintrc still present (must exist if it was on master) ==="
-git show master:pylintrc &>/dev/null 2>&1 && { [ -f pylintrc ] && echo "OK: pylintrc kept" || echo "FAIL: pylintrc deleted"; } || echo "(no pylintrc on master)"
 ```
 
-**Pass:** No `[tool.ruff]` sections; `ruff` appears nowhere in pyproject/lock/tox/Makefile/CI; `pylintrc`/`pylintrc_tweaks` are still present if master had them.
+**Pass:** No `[tool.ruff]` sections; `ruff` appears nowhere in pyproject/lock/tox/Makefile/CI. (`pylintrc`/`pylintrc_tweaks` presence is verified by Test 9.)
 
-**Fail → HALT:** If ruff is present in any form, **stop the test suite immediately.** Do not run Tests 2–25. Report only this failure and instruct:
+**Fail → HALT:** If ruff is present in any form, **stop the test suite immediately.** Do not run Tests 2–29. Report only this failure and instruct:
 
-> Ruff was found in this PR, but ruff is out of scope for this cycle (public-engineering#506). Drop the ruff implementation from this PR — either revert the ruff changes here, or split them into their own stacked PR with **Mode 5 (Separate-ruff)** — then re-run the test suite.
+> Ruff was found in this PR, but ruff is out of scope for this cycle (public-engineering#506). Revert the ruff changes from this PR, then re-run the test suite.
 
 In Test/Verify mode, mark every other test `⏭️ Skipped (halted at Test 1 — ruff present)`. In Implement/Re-implement mode, remove ruff before continuing.
 
@@ -748,24 +638,38 @@ make docs      # skip if no docs/ directory exists
 
 A target that was working before the migration and fails now is a regression, not an out-of-scope item.
 
-### Test 3 — Package build and tarball contents
+### Test 3 — Package build and distribution contents
 
-Build the distribution and verify the tarball contains everything it should:
+Build the package **once** on the PR branch and **once** on master/main, then inspect and compare both tarballs and wheels in a single pass — no repeated builds.
+
+**Step 1 — Build the PR branch (single authoritative build):**
 
 ```bash
-# Build (prefer uv-based invocation; fall back to plain python -m build)
 uv run python -m build
-# or, if uv is not available:
-#   pip install build && python -m build
+ls dist/
 ```
 
-Then inspect the generated `.tar.gz` under `dist/`:
+**Step 2 — Build main/master in an isolated worktree:**
+
+Do **not** use `git stash` + `git checkout` — use a worktree to avoid conflicts with uncommitted changes:
 
 ```bash
-# List what was produced
-ls dist/
+git worktree add /tmp/bundle-worktree-main main   # or: master
+cd /tmp/bundle-worktree-main
 
-# Extract and inspect the tarball (replace <name>-<version> with the actual filename stem)
+# --no-isolation keeps the old setup.py readable (it often reads requirements with relative paths)
+python -m build --no-isolation --outdir /tmp/bundle-main
+# If build deps are missing:
+#   pip install setuptools wheel build
+#   python -m build --no-isolation --outdir /tmp/bundle-main
+
+cd -   # return to repo root
+ls /tmp/bundle-main/
+```
+
+**Step 3 — Inspect PR tarball (absolute checks):**
+
+```bash
 tar -tzf dist/<name>-<version>.tar.gz | sort
 ```
 
@@ -775,7 +679,6 @@ Check that the tarball includes **all** of the following (adjust paths to match 
 |---|---|
 | `PKG-INFO` | PEP 566 metadata — generated from `pyproject.toml` |
 | `pyproject.toml` | Build recipe — must be included by setuptools |
-| `setup.cfg` (if any) | Should **not** be present — it was deleted |
 | Source package directory (e.g. `src/<package>/`) | All `.py` files under the package root |
 | `README.rst` or `README.md` | Linked via `readme =` in `[project]` |
 | `LICENSE` | Required for PyPI |
@@ -786,6 +689,85 @@ Flag as a failure if:
 - Deleted files (`setup.py`, `setup.cfg`, `CHANGELOG.rst`) appear in the tarball — they should not be included after deletion.
 - The source package directory is missing or empty.
 - Static assets that existed before the migration are absent — their absence will break installs.
+
+**Step 4 — Inspect PR wheel (absolute checks):**
+
+```bash
+unzip -l dist/<name>-<version>-py3-none-any.whl | sort
+```
+
+Check that:
+- The package directory and all its `.py` files are present — the wheel strips the `src/` prefix, so the package appears as `<package>/` (not `src/<package>/`).
+- Static assets (templates, JS, CSS, locale files) are included — wheels use `package_data` rules, not `MANIFEST.in`.
+- `METADATA` (wheel equivalent of `PKG-INFO`) is present under `<name>-<version>.dist-info/`.
+- No compiled `.pyc` files or test files appear in the wheel.
+
+If static assets are missing from the wheel but present in the tarball, add them under `[tool.setuptools.package-data]` in `pyproject.toml`.
+
+**Step 5 — Compare tarball against main (regression diff):**
+
+Version strings differ between branches and the `src/` move relocates the package. Strip both the `<name>-<version>/` prefix and any leading `src/` to avoid false regressions:
+
+```bash
+diff \
+  <(tar -tzf /tmp/bundle-main/<pkg>-*.tar.gz | sed 's|[^/]*/||' | sed 's|^src/||' | sort) \
+  <(tar -tzf dist/<pkg>-*.tar.gz             | sed 's|[^/]*/||' | sed 's|^src/||' | sort)
+```
+
+Lines starting with `<` are present in **main** but **missing from PR** — these are regressions. Lines starting with `>` are present in **PR** but not in main — expected additions (new tooling files).
+
+**Step 6 — Compare wheel against main (regression diff):**
+
+The wheel strips `src/` on both branches, so no extra normalisation is needed:
+
+```bash
+diff \
+  <(unzip -l /tmp/bundle-main/<pkg>-*-py3-none-any.whl | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort) \
+  <(unzip -l dist/<pkg>-*-py3-none-any.whl             | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort)
+```
+
+**Step 7 — Clean up:**
+
+```bash
+git worktree remove /tmp/bundle-worktree-main --force
+```
+
+**Flag as REGRESSION** if any of the following are missing from the PR bundle but present in main:
+
+| Missing file type | Consequence |
+|---|---|
+| Any `.py` file under the source package directory | Broken installs — code simply won't be there |
+| Static assets (`*.html`, `*.css`, `*.js`, `*.png`, `*.json`, `*.po`, `*.mo`) | UI or locale breakage at runtime |
+| `LICENSE`, `README.*`, `pyproject.toml` | Missing PyPI metadata — may fail upload validation |
+| `setup.cfg`, `setup.py` (deleted intentionally) | These should **not** appear in main's bundle either; if they do, note it but do not re-add them |
+
+**Common false regressions (expected PR-only additions):**
+
+| Added in PR | Reason |
+|---|---|
+| `pyproject.toml`, `tox.ini`, `uv.lock` | New tooling files — expected |
+| `<pkg>.egg-info/scm_file_list.json`, `scm_version.json` | setuptools-scm artifacts — expected |
+
+**Watch for the implicit namespace package trap (wheel only):**
+
+Modern setuptools treats any directory without `__init__.py` as an implicit namespace package and may include it in the wheel. Common culprits: `docs/`, `scripts/`, `bin/`. If a non-source directory appears in the PR wheel but not the main wheel, fix it:
+
+```toml
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["tests*", "*.tests", "*.tests.*", "docs*"]
+```
+
+Also check the inverse: static assets (templates, JS, CSS) that were in the main wheel but missing from the PR wheel. This happens when `setup.py` used `include_package_data=True` or `package_data` and the new `pyproject.toml` doesn't replicate it. Fix with:
+
+```toml
+[tool.setuptools.package-data]
+"mypackage" = ["templates/*", "static/**/*"]
+```
+
+**Pass:** PR tarball contains all required files; no deleted file reappears; PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel.
+
+**Fail:** Any deleted file reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression).
 
 ### Test 4 — Lockfile consistency
 
@@ -843,24 +825,7 @@ uv run python -m setuptools_scm
 
 This should print a version string (e.g. `1.2.3` or `1.2.3.dev4+gabcdef`). If it prints an error about no git tags or a dirty working tree, note it — the build will fail until a tag exists, which is expected for a brand-new repo. If it errors on a repo that already has tags, the `[tool.setuptools_scm]` config is wrong.
 
-### Test 9 — Wheel contents
-
-`python -m build` produces both a `.tar.gz` and a `.whl`. Inspect the wheel too:
-
-```bash
-# List wheel contents (replace filename with actual)
-unzip -l dist/<name>-<version>-py3-none-any.whl | sort
-```
-
-Check that:
-- The package directory and all its `.py` files are present — note the wheel strips the `src/` prefix, so the package appears as `<package>/` (not `src/<package>/`).
-- Static assets (templates, JS, CSS, locale files) are included — wheels use `package_data` rules, not `MANIFEST.in`.
-- `METADATA` (wheel equivalent of `PKG-INFO`) is present under `<name>-<version>.dist-info/`.
-- No compiled `.pyc` files or test files appear in the wheel.
-
-If static assets are missing from the wheel but present in the tarball, add them under `[tool.setuptools.package-data]` in `pyproject.toml`.
-
-### Test 10 — No stale files on disk
+### Test 9 — No stale files on disk
 
 Confirm that files which should have been deleted are actually gone (and that files which must be kept are still present):
 
@@ -880,7 +845,7 @@ done
 
 Any `STALE:` line or `REGRESSION:` line is a failure. Note: `CHANGELOG.rst` counts as `STALE` only on PyPI repos (release gate passed); for no-PyPI repos it must be kept, so a present `CHANGELOG.rst` there is correct.
 
-### Test 11 — GitHub Actions workflow YAML validity
+### Test 10 — GitHub Actions workflow YAML validity
 
 Validate the CI and release workflow files are syntactically correct YAML before pushing. Use `actionlint`, not `yamllint` — `yamllint`'s 80-char line limit flags every SHA-pinned action line as an error, producing noise that cannot be fixed without removing the SHA or the version comment. `actionlint` checks for real structural problems (unknown fields, bad expressions, missing secrets) without style rules:
 
@@ -891,129 +856,38 @@ actionlint .github/workflows/ci.yml .github/workflows/release.yml
 
 A syntax or structural error in a workflow file causes a silent failure on GitHub (the workflow simply never runs). Catching it locally saves a push-and-wait cycle.
 
-### Test 12 — SHA pinning audit
+### Test 11 — SHA pinning audit
 
-Scan every workflow file for GitHub Actions references that are not SHA-pinned:
+**Gated: only run this test when the user explicitly asks for it** (e.g. "run Test 11", "check SHA pinning", "audit action pins"). Skip it in all other test runs — including full Mode 3 verification sweeps — and record the row as `⏭️ Skipped (gated — run explicitly to check SHA pinning)`.
+
+Scan only workflow files that were **added or modified by this PR** for GitHub Actions references that are not SHA-pinned. Pre-existing workflow files unchanged from master are out of scope — do not flag or modify them.
 
 ```bash
-# Print any action reference that is NOT a 40-char SHA
-grep -rE 'uses:\s+\S+@' .github/workflows/ \
+# Identify workflow files changed by this PR
+git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml'
+```
+
+For each changed workflow file, check for un-pinned references — **excluding org-internal reusable workflow calls** (i.e. lines whose `uses:` path starts with an org prefix like `openedx/.github/`):
+
+```bash
+# Print any action reference that is NOT a 40-char SHA, in PR-changed files only,
+# excluding org-internal reusable workflow calls (openedx/.github@master etc.)
+git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml' \
+  | xargs grep -E 'uses:\s+\S+@' \
   | grep -v '@[0-9a-f]\{40\}' \
-  | grep -v '^#'
+  | grep -v '^#' \
+  | grep -v 'uses:\s\+openedx/\.github/'
 ```
 
-Any output from this command means there is an un-pinned action. Replace the floating tag with its resolved SHA and add a version comment (e.g. `# v6.0.2`).
+Any remaining output means there is an un-pinned third-party action in a PR-modified workflow. Replace the floating tag with its resolved SHA and add a version comment (e.g. `# v6.0.2`).
 
-### Test 13 — Bundle diff against main
+**Pass:** No un-pinned third-party action references in any workflow file added or modified by the PR.
 
-Compare the distribution tarball produced on the PR branch against one built from `main` (or `master`) to catch accidental file exclusions introduced by the migration.
+**Out of scope:**
+- Pre-existing workflow files unchanged from master.
+- Org-internal reusable workflow calls (e.g. `openedx/.github/.github/workflows/foo.yml@master`) — these use `@master` as an org-wide convention and must not be SHA-pinned.
 
-**Step 1 — Build on main/master using a worktree:**
-
-Do **not** use `git stash` + `git checkout` + `git stash pop` — this causes merge conflicts when the stash contains changes that conflict with the branch being checked out. Use a git worktree instead, which gives a clean isolated checkout with no risk to the current working tree:
-
-```bash
-# Create an isolated checkout of the base branch
-git worktree add /tmp/bundle-worktree-main main   # or: master
-
-# Confirm the key files are there
-ls /tmp/bundle-worktree-main/
-```
-
-**Step 2 — Build from the worktree:**
-
-The old `setup.py` often reads files like `requirements.txt` using a relative path. `python -m build` (with its default isolated build environment) can fail to find those files because the build frontend may change the working directory. Use `--no-isolation` to build directly in the project directory:
-
-```bash
-cd /tmp/bundle-worktree-main
-python -m build --no-isolation --outdir /tmp/bundle-main
-ls /tmp/bundle-main/
-```
-
-If `--no-isolation` fails due to missing build deps, install them first:
-
-```bash
-pip install setuptools wheel build
-python -m build --no-isolation --outdir /tmp/bundle-main
-```
-
-**Step 3 — Build on the PR branch:**
-
-```bash
-# Build from the original repo directory (PR branch is already checked out there)
-cd /path/to/repo   # or just stay in the repo root
-
-uv run python -m build --outdir /tmp/bundle-pr
-ls /tmp/bundle-pr/
-```
-
-**Step 4 — Compare tarball contents (strip version prefix AND the src/ prefix first):**
-
-Version strings differ between branches, and the `src/` move relocates the package from `<pkg>/` (main) to `src/<pkg>/` (PR). Strip both the `<name>-<version>/` prefix and any leading `src/` so the move does not show as a false regression:
-
-```bash
-# Replace <pkg> with the actual package name (e.g. openedx_webhooks)
-diff \
-  <(tar -tzf /tmp/bundle-main/<pkg>-*.tar.gz | sed 's|[^/]*/||' | sed 's|^src/||' | sort) \
-  <(tar -tzf /tmp/bundle-pr/<pkg>-*.tar.gz   | sed 's|[^/]*/||' | sed 's|^src/||' | sort)
-```
-
-Interpret the diff output:
-- Lines starting with `<` — present in **main** but **missing from PR**. These are regressions.
-- Lines starting with `>` — present in **PR** but not in main. These are expected additions (new tooling files).
-
-**Step 5 — Compare wheel contents:**
-
-The wheel strips `src/` on both branches, so no extra normalization is needed there:
-
-```bash
-diff \
-  <(unzip -l /tmp/bundle-main/<pkg>-*-py3-none-any.whl | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort) \
-  <(unzip -l /tmp/bundle-pr/<pkg>-*-py3-none-any.whl   | awk '{print $4}' | grep -v '^$\|^Name\|^----\|files$' | sort)
-```
-
-**Step 6 — Clean up the worktree:**
-
-```bash
-git worktree remove /tmp/bundle-worktree-main --force
-```
-
-**Flag as REGRESSION** if any of the following are missing from the PR bundle but present in main:
-
-| Missing file type | Consequence |
-|---|---|
-| Any `.py` file under the source package directory | Broken installs — code simply won't be there |
-| Static assets (`*.html`, `*.css`, `*.js`, `*.png`, `*.json`, `*.po`, `*.mo`) | UI or locale breakage at runtime |
-| `LICENSE`, `README.*`, `pyproject.toml` | Missing PyPI metadata — may fail upload validation |
-| `setup.cfg`, `setup.py` (deleted intentionally) | These should NOT appear in main's bundle either; if they do, note it but do not re-add them |
-
-**Common false regressions (expected PR-only additions):**
-
-| Added in PR | Reason |
-|---|---|
-| `pyproject.toml`, `tox.ini`, `uv.lock` | New tooling files — expected |
-| `release.yml`, `commitlint.yml` | New workflow files — expected |
-| `.github/workflows/` entries | New or updated CI files — expected |
-| `<pkg>.egg-info/scm_file_list.json`, `scm_version.json` | setuptools-scm artifacts — expected |
-
-**Watch for the implicit namespace package trap (wheel only):**
-
-Modern setuptools (via PEP 420) treats any directory without `__init__.py` as an implicit namespace package and may include it in the wheel. Common culprits: `docs/`, `scripts/`, `bin/`. If a non-source directory appears in the PR wheel but not the main wheel, fix it by adding it to the exclude list in `pyproject.toml`:
-
-```toml
-[tool.setuptools.packages.find]
-where = ["src"]
-exclude = ["tests*", "*.tests", "*.tests.*", "docs*"]
-```
-
-Also check the inverse: static assets (templates, JS, CSS) that were in the main wheel but missing from the PR wheel. This happens when `setup.py` used `include_package_data=True` or `package_data` and the new `pyproject.toml` doesn't replicate it. Fix with:
-
-```toml
-[tool.setuptools.package-data]
-"mypackage" = ["templates/*", "static/**/*"]
-```
-
-### Test 14 — Logic change audit (informational only)
+### Test 12 — Logic change audit (informational only)
 
 Review the full PR diff for changes that alter runtime behaviour. This test is **informational only** — logic changes embedded in a migration PR are the author's decision and are out of scope for this skill to approve or reject. Do not flag them as failures and do not suggest splitting the PR.
 
@@ -1032,7 +906,7 @@ Read every modified `.py` file in the diff. For each changed function, class, or
 
 There should be **no** ruff-formatting changes this cycle (ruff is out of scope). If you see mass reformatting (quote-style flips, import reordering, whitespace churn) across many files, that is a sign ruff crept in — cross-check against Test 1. Report any genuine logic or behaviour changes as a brief note for awareness — but do not mark them `ACTION REQUIRED` and do not recommend a separate PR.
 
-### Test 15 — No `__version__` in package source
+### Test 13 — No `__version__` in package source
 
 The version is now owned by `pyproject.toml` under both versioning paths. There is no reason to declare `__version__` in `__init__.py`. Check that none exists:
 
@@ -1056,7 +930,7 @@ The `except` block **must** assign a fallback — never use bare `pass`. Without
 
 For no-PyPI repos, the `importlib.metadata` pattern is also acceptable when there is a genuine runtime need — but the simpler and preferred outcome is no `__version__` in `__init__.py` at all.
 
-### Test 16 — Makefile target and CI parity
+### Test 14 — Makefile target and CI parity
 
 Compare the inventory tables produced in Mode 1 Step 1 (Tables A and B) against the post-migration state. In Test/Verify mode, reconstruct the tables from the base branch first (`git show master:Makefile`, `git show master:.github/workflows/<ci>.yml`).
 
@@ -1091,7 +965,7 @@ A tool that ran in the old CI must run in the new CI. Common gaps to check:
 
 Flag any CI step from Table B that has no corresponding new matrix entry.
 
-### Test 17 — Branch protection check name coverage
+### Test 15 — Branch protection check name coverage
 
 Confirm the new CI produces every check name that branch protection requires:
 
@@ -1124,7 +998,7 @@ Common failure pattern: old CI had `name: Tests` + `matrix: os: [ubuntu-latest],
 
 This generates `Tests (ubuntu-latest, 3.12)` and satisfies the branch protection rule without any repo admin involvement.
 
-### Test 18 — Dependency package parity
+### Test 16 — Dependency package parity
 
 Verify that every package declared in master's `requirements/*.in` files is still present somewhere in `[project].dependencies` or `[dependency-groups]` in `pyproject.toml`. This catches silent drops during the migration. **Because ruff is out of scope, the linters (pylint/isort/pycodestyle/pydocstyle) are NOT removed — only pip-tools is.**
 
@@ -1208,7 +1082,7 @@ PYEOF
 
 **`ADDED:` lines are expected** for `tox`, `tox-uv` (new tooling). `ruff` must **not** appear here — if it does, Test 1 should have already halted.
 
-### Test 19 — Constraints migration
+### Test 17 — Constraints migration
 
 If `requirements/constraints.txt` existed on master/main, verify it was properly migrated to `pyproject.toml` (per the constraints procedure in the Target state).
 
@@ -1264,13 +1138,9 @@ For each repo-specific pin noted in Step 1 (those beyond the common `-c` include
 grep -F "<repo-specific-pin>" pyproject.toml   # replace with the actual pin
 ```
 
-**Step 5 — Verify the lockfile respects the constraints:**
+**Step 5 — Spot-check that the lockfile respects a repo-specific constraint:**
 
-```bash
-uv lock --check
-```
-
-Then spot-check a constrained package in `uv.lock` (e.g. for `Django<6.0`):
+Lockfile consistency (`uv lock --check`) is covered by Test 4. After completing Steps 1–4, spot-check one constrained package in `uv.lock` to confirm the constraint was applied (e.g. for `Django<6.0`):
 
 ```bash
 grep -A2 'name = "django"' uv.lock
@@ -1278,18 +1148,36 @@ grep -A2 'name = "django"' uv.lock
 
 The resolved version must satisfy the constraint.
 
-**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty (contains at least the edx-lint common constraints); all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; `uv lock --check` exits 0.
+**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty (contains at least the edx-lint common constraints); all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins.
 
-**Fail:** Either section is missing; `constraint-dependencies` is empty when it should be populated; a repo-specific pin from the old `constraints.txt` is absent; or `uv lock --check` fails.
+**Fail:** Either section is missing; `constraint-dependencies` is empty when it should be populated; a repo-specific pin from the old `constraints.txt` is absent; or a constrained package in `uv.lock` does not satisfy the pin.
 
-### Test 20 — PyPI publish uses OIDC trusted publishing
+### Test 18 — release.yml structure: CI first, then OIDC publish only
 
-Skip (with reason) if the release gate excluded `release.yml`. Otherwise verify that `release.yml`'s `publish_to_pypi` job uses **OIDC trusted publishing** — the org-wide mechanism for this cycle (#506), applied even if master used token auth.
+Skip (with reason) if the release gate excluded `release.yml`. Otherwise verify that `release.yml` (a) runs the CI workflow first via a reusable-workflow call, and (b) publishes to PyPI using **OIDC trusted publishing only** — no token auth anywhere.
 
-**Step 1 — Inspect the new `release.yml`:**
+**Step 0 — Verify CI runs first (run_tests / run_ci job):**
+
+The `release.yml` must contain a job (`run_tests` or `run_ci`) that calls the CI workflow as a reusable workflow (`workflow_call`). The `release` and `publish_to_pypi` jobs must depend on it via `needs:`.
 
 ```bash
-echo "=== id-token permission (must be present) ==="
+echo "=== run_tests / run_ci job calling CI workflow ==="
+grep -n "uses:.*ci\.yml\|uses:.*python-tests\.yml" .github/workflows/release.yml \
+  || echo "(none — FAIL: release.yml must call the CI workflow as a reusable workflow)"
+
+echo "=== release job needs run_tests/run_ci ==="
+awk '/^  release:/,/^  [a-z]/' .github/workflows/release.yml | grep "needs:" \
+  || echo "(FAIL: release job must declare needs: run_tests or run_ci)"
+
+echo "=== publish_to_pypi job needs release ==="
+awk '/^  publish_to_pypi:/,/^  [a-z]/' .github/workflows/release.yml | grep "needs:" \
+  || echo "(FAIL: publish_to_pypi job must declare needs: release)"
+```
+
+**Step 1 — Inspect the new `release.yml` for OIDC:**
+
+```bash
+echo "=== id-token permission (must be present on publish_to_pypi) ==="
 grep -n "id-token" .github/workflows/release.yml || echo "(none — FAIL)"
 echo "=== password / PYPI_UPLOAD_TOKEN (must be absent) ==="
 grep -nE "password:|PYPI_UPLOAD_TOKEN" .github/workflows/release.yml || echo "(none — OK)"
@@ -1305,11 +1193,11 @@ OIDC requires a trusted publisher pre-configured on the PyPI project page (handl
 gh pr view <number> --json body --jq '.body' | grep -iE "trusted publisher|OIDC" || echo "MISSING: OIDC trusted-publisher merge-blocker note in PR description"
 ```
 
-**Pass:** `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; the PR description flags the trusted-publisher config as an out-of-band merge blocker.
+**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:` pointing at those upstream jobs; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; the PR description flags the trusted-publisher config as an out-of-band merge blocker.
 
-**Fail:** Token auth is used (`password:`/`PYPI_UPLOAD_TOKEN` present) or `id-token: write` is missing; the workflow is misnamed; or the merge-blocker note is absent. Switch to OIDC and add the note. Remember the PR must not merge until the trusted publisher is confirmed configured (first publish fails silently otherwise).
+**Fail:** No reusable CI call (CI not run before publish); `release`/`publish_to_pypi` missing `needs:`; token auth used (`password:`/`PYPI_UPLOAD_TOKEN` present); `id-token: write` missing; workflow misnamed; or merge-blocker note absent. Fix each gap — and remember the PR must not merge until the trusted publisher is confirmed configured on PyPI.
 
-### Test 21 — Configuration thresholds must maintain parity with master
+### Test 19 — Configuration thresholds must maintain parity with master
 
 Verify no configuration thresholds, limits, or settings were introduced that don't exist in master/main (see "codecov.yml and no inventions" in the Target state — migration is tooling, not policy).
 
@@ -1339,7 +1227,7 @@ grep -E "fail_under|min_percent|threshold|limit" pyproject.toml | grep -v "# " |
 
 **Recovery:** Remove any new configuration settings. Keep only what existed in master. If a threshold was present before, carry it over exactly as it was.
 
-### Test 22 — Static versioning parity (no-PyPI repos)
+### Test 20 — Static versioning parity (no-PyPI repos)
 
 **Skip this test if a PyPI publish workflow exists on master/main** — setuptools-scm is in use on that path and Test 8 covers it. Record as `⏭️ Skipped (PyPI publish workflow exists — setuptools-scm used)`.
 
@@ -1417,9 +1305,11 @@ else:
 
 **Fail:** `setuptools-scm` present in build system; `dynamic = ["version"]` is set; or `[project].version` is absent.
 
-### Test 23 — PR description completeness
+### Test 21 — PR description completeness
 
-Verify the PR body contains every required section in the correct order and with real content. Run this after Mode 1 Step 6 or Mode 4, or as part of a full Mode 3 verification.
+**Gated: only run this test when the user explicitly asks for it** (e.g. "run Test 21", "check the PR description", "verify the PR body"). Skip it in all other test runs — including full Mode 3 verification sweeps — and record the row as `⏭️ Skipped (gated — run explicitly to check PR description)`.
+
+Verify the PR body contains every required section in the correct order and with real content. Run this after Mode 1 Step 6 or Mode 4 when asked.
 
 **Step 1 — Read the PR body:**
 
@@ -1513,16 +1403,26 @@ DROPPED=$(git diff master...HEAD -- pyproject.toml \
 # 4a. release.yml presence vs description claims
 echo "=== 4a: release.yml ==="
 HAS_RELEASE_YML=$([ -f .github/workflows/release.yml ] && echo "yes" || echo "no")
+HAS_SRC=$([ -d src ] && echo "yes" || echo "no")
 if [ "$HAS_RELEASE_YML" = "yes" ]; then
   grep -iE "add.*python-semantic-release|add.*release\.yml|python-semantic-release.*release\.yml" /tmp/pr_body.txt \
     || echo "INCORRECT: release.yml exists in branch but Summary does not mention it was added"
-  grep -i "## Not included" /tmp/pr_body.txt \
-    && echo "INCORRECT: '## Not included' section present but release.yml exists in branch"
+  # Section is only forbidden when BOTH release.yml is present AND src/ layout is present
+  if [ "$HAS_SRC" = "yes" ]; then
+    grep -i "## Not included/implemented" /tmp/pr_body.txt \
+      && echo "INCORRECT: '## Not included/implemented' section present but both release.yml and src/ exist"
+  fi
 else
-  grep -i "## Not included" /tmp/pr_body.txt \
-    || echo "INCORRECT: '## Not included' section missing — release.yml was not added"
+  grep -i "## Not included/implemented" /tmp/pr_body.txt \
+    || echo "INCORRECT: '## Not included/implemented' section missing — release.yml was not added"
   grep -iE "add.*python-semantic-release|add.*release\.yml" /tmp/pr_body.txt \
     && echo "INCORRECT: Summary claims release.yml was added but it does not exist in branch"
+fi
+if [ "$HAS_SRC" = "no" ]; then
+  grep -i "## Not included/implemented" /tmp/pr_body.txt \
+    || echo "INCORRECT: '## Not included/implemented' section missing — src/ layout was not adopted"
+  grep -i "src/" /tmp/pr_body.txt \
+    || echo "INCORRECT: '## Not included/implemented' section missing src/ layout bullet"
 fi
 
 # 4b. Versioning section matches pyproject.toml
@@ -1597,65 +1497,27 @@ done
 - A conditional section is missing when its condition is true (no publish workflow / Python dropped / src move).
 - Content accuracy mismatch (Step 4): description claims something that is not true of the actual PR — correct the specific claim.
 
-### Test 24 — Zero-version guard in semantic-release config
+### Test 22 — src/ layout (conditional on PyPI publishing)
 
-**Skip this test if the release gate excluded `release.yml`** — `[tool.semantic_release]` is not present for no-PyPI repos. Record as `⏭️ Skipped (no PyPI publish workflow — semantic-release not added)`.
+**Step 0 — Determine release gate (PyPI publishing):**
 
-Verify that `[tool.semantic_release]` correctly includes or excludes `allow_zero_version` and `major_on_zero` based on the repo's current release version (per the #506 versioning rules: 0.x repos bump minor/patch, 1.0+ repos bump major/minor/patch).
-
-**Step 1 — Determine the current version from git tags:**
+Check whether a PyPI publish workflow exists on master/main (same gate as release.yml). If yes, this is a PyPI repo and `src/` layout is required. If no, this is a non-PyPI repo and `src/` layout is optional; proceed to Step 1b.
 
 ```bash
-LATEST_TAG=$(git tag --sort=version:refname | grep -E '^v?[0-9]+\.[0-9]+' | tail -1)
-echo "Latest tag: ${LATEST_TAG:-(none)}"
-MAJOR=$(echo "$LATEST_TAG" | grep -oE '[0-9]+' | head -1)
-echo "Major version: ${MAJOR:-(none — treat as 0)}"
+# Check for PyPI publish workflow on master/main
+PUBLISH_WORKFLOW=$(git ls-tree master .github/workflows/ 2>/dev/null | grep -E 'release\.yml|pypi.*publish|publish.*pypi' || git ls-tree main .github/workflows/ 2>/dev/null | grep -E 'release\.yml|pypi.*publish|publish.*pypi' || echo "")
+if [ -n "$PUBLISH_WORKFLOW" ]; then
+    echo "PyPI repo: src/ layout REQUIRED"
+    PYPI_REPO=true
+else
+    echo "Non-PyPI repo: src/ layout OPTIONAL"
+    PYPI_REPO=false
+fi
 ```
 
-If `MAJOR` is empty (no release tags), treat it as `0` — the repo has never cut a stable release.
-
-**Step 2 — Read the semantic-release config:**
-
-```bash
-python3 -c "
-import tomllib
-with open('pyproject.toml', 'rb') as f:
-    data = tomllib.load(f)
-sr = data.get('tool', {}).get('semantic_release', {})
-allow_zero = sr.get('allow_zero_version')
-major_on_zero = sr.get('major_on_zero')
-print(f'allow_zero_version = {allow_zero!r}')
-print(f'major_on_zero = {major_on_zero!r}')
-"
-```
-
-**Step 3 — Evaluate:**
-
-| Condition | Expected | Fail if |
-|---|---|---|
-| Latest tag is `v0.x.y` or no release tags | `allow_zero_version = true` **and** `major_on_zero = false` both present | Either setting absent |
-| Latest tag is `v1.x.y` or higher | Neither setting present | Either setting present |
-
-**Pass:** Settings match the table above for this repo's current version.
-
-**Fail:** Either setting is absent on a 0.x repo; or either setting is present on a 1.x+ repo.
-
-**Recovery for 0.x repo:** Add to `[tool.semantic_release]` in `pyproject.toml`:
-
-```toml
-[tool.semantic_release]
-allow_zero_version = true
-major_on_zero = false
-build_command = "..."  # keep the existing build_command value
-```
-
-### Test 25 — src/ layout
-
-**Skip this test if the user explicitly opted out of the src/ move for this repo.** Record as `⏭️ Skipped (src/ move opted out by user)`.
+**Step 1a — For PyPI repos (src/ layout is required):**
 
 Verify the importable package was moved under `src/` and that packaging points at it.
-
-**Step 1 — Confirm the package lives under `src/`:**
 
 ```bash
 PKG=$(python3 -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print(d['project']['name'].replace('-','_'))" 2>/dev/null)
@@ -1664,7 +1526,21 @@ PKG=$(python3 -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); p
 if [ -d "$PKG" ] && [ "$PKG" != "src" ]; then echo "FAIL: top-level $PKG/ still exists — package was not moved, it was duplicated"; else echo "OK: no stray top-level $PKG/"; fi
 ```
 
-**Step 2 — Confirm pyproject points at src:**
+**Step 1b — For non-PyPI repos (src/ layout is optional):**
+
+Check if `src/` layout was adopted. If yes, verify it is correctly configured (proceed to Step 2). If no, verify that the PR description documents why `src/` was not adopted.
+
+```bash
+if [ -d "src" ]; then
+    echo "src/ layout is present"
+    SRC_PRESENT=true
+else
+    echo "src/ layout is absent"
+    SRC_PRESENT=false
+fi
+```
+
+**Step 2 — Confirm pyproject points at src (only if src/ layout present):**
 
 ```bash
 python3 -c "
@@ -1674,11 +1550,16 @@ with open('pyproject.toml', 'rb') as f:
 find = data.get('tool', {}).get('setuptools', {}).get('packages', {}).get('find', {})
 where = find.get('where')
 print(f'where = {where!r}')
-print('OK' if where == ['src'] else 'FAIL: [tool.setuptools.packages.find].where should be [\"src\"]')
+if where == ['src']:
+    print('OK: [tool.setuptools.packages.find].where = [\"src\"]')
+elif where is None:
+    print('OK: [tool.setuptools.packages.find].where is not set (flat layout)')
+else:
+    print(f'FAIL: unexpected where value: {where!r}')
 "
 ```
 
-**Step 3 — Confirm the move preserved history and import works:**
+**Step 3 — Confirm the move preserved history and import works (only if src/ layout present):**
 
 ```bash
 # History preserved (git mv, not delete+add):
@@ -1687,63 +1568,96 @@ git log --oneline --follow -1 -- "src/$PKG/__init__.py" >/dev/null 2>&1 && echo 
 uv run python -c "import $PKG; print('import OK')"
 ```
 
-**Pass:** `src/<pkg>/` exists; no stray top-level `<pkg>/`; `where = ["src"]`; the package imports cleanly; coverage config measures the package under src.
-
-**Fail:** Package not moved (still top-level), duplicated (exists in both places), `where` not set to `["src"]`, or import fails.
-
-### Test 26 — Tooling parity with master/main
-
-Ensure no linting, type-checking, or test tools were added or removed compared to master/main. The migration preserves the repo's existing tooling ecosystem exactly—only how tools are invoked changes (from pip-compile to uv, from bare tox to uv run tox). Master had specific tools like pylint, mypy, isort, pycodestyle, pydocstyle, pytest, coverage, and sphinx for good reasons. Removing them silently breaks the repo's quality gates; adding new ones introduces surprise dependencies. Parity ensures the migration is purely about tooling and workflow, not policy.
+**Step 4 — For non-PyPI repos without src/ layout, verify PR description documents the decision:**
 
 ```bash
-python3 << 'PYEOF'
-import tomllib
-import subprocess
-
-# Get tools from master
-master_result = subprocess.run(['git', 'show', 'master:pyproject.toml'], 
-                               capture_output=True, text=True)
-master_tools = set()
-if master_result.returncode == 0:
-    try:
-        master_data = tomllib.loads(master_result.stdout)
-        for group in master_data.get('dependency-groups', {}).values():
-            for dep in (group if isinstance(group, list) else []):
-                name = dep.split('[')[0].split(';')[0].split('>=')[0].split('>')[0].split('<')[0].split('==')[0].split('!=')[0].split('~')[0].strip().lower()
-                if any(t in name for t in ['pylint', 'mypy', 'isort', 'pycodestyle', 'pydocstyle', 'pytest', 'coverage', 'sphinx', 'flake8']):
-                    master_tools.add(name.split('-')[0])
-    except:
-        pass
-
-# Get tools from current branch
-with open('pyproject.toml', 'rb') as f:
-    current_data = tomllib.load(f)
-current_tools = set()
-for group in current_data.get('dependency-groups', {}).values():
-    for dep in (group if isinstance(group, list) else []):
-        name = dep.split('[')[0].split(';')[0].split('>=')[0].split('>')[0].split('<')[0].split('==')[0].split('!=')[0].split('~')[0].strip().lower()
-        if any(t in name for t in ['pylint', 'mypy', 'isort', 'pycodestyle', 'pydocstyle', 'pytest', 'coverage', 'sphinx', 'flake8']):
-            current_tools.add(name.split('-')[0])
-
-removed = master_tools - current_tools
-added = current_tools - master_tools
-
-if removed:
-    print(f"FAIL: tools removed from master: {removed}")
-elif added:
-    print(f"WARN: new tools added: {added} (only ruff should be new, and ruff is gated)")
-else:
-    print("OK: tooling parity maintained with master")
-PYEOF
+# Check if PR description (or commit message) mentions why src/ was not adopted
+if [ "$PYPI_REPO" = "false" ] && [ "$SRC_PRESENT" = "false" ]; then
+    # Read the PR/commit message and search for documentation
+    # Look for a phrase like "src/ layout was not adopted" or similar in the PR description
+    grep -q "src.*layout.*not.*adopt\|flat.*layout.*retained\|does not publish to PyPI" CHANGELOG.md 2>/dev/null || grep -q "src.*layout\|flat.*layout" <(git log -1 --pretty=%B) || echo "WARN: PR description should document why src/ layout was not adopted"
+fi
 ```
 
-**Pass:** All tools present on master/main are still present. No quality or test tools were silently dropped.
+**Pass conditions:**
 
-**Fail:** Any tool that existed on master (pylint, mypy, isort, etc.) is missing.
+- **PyPI repo:** `src/<pkg>/` exists; no stray top-level `<pkg>/`; `where = ["src"]`; the package imports cleanly.
+- **Non-PyPI repo with src/ layout:** Same as PyPI repo above — layout is correctly configured.
+- **Non-PyPI repo without src/ layout:** Package remains at top level; `where` is not set (or defaults to searching root); **PR description documents why `src/` layout was not adopted** (e.g., "repo does not publish to PyPI; flat layout retained").
 
-### Test 27 — Versioning strategy (consolidated)
+**Fail conditions:**
 
-Verify the versioning approach matches the release gate decision and is correctly configured throughout the pyproject.toml, build system, and setuptools_scm settings. This test covers the complete versioning picture: PyPI-publishing repos must use setuptools-scm with dynamic version, no-PyPI repos must use static version, and repos on 0.x branches require zero-version guard settings.
+- **PyPI repo:** Package not moved (still top-level), duplicated (exists in both places), `where` not set to `["src"]`, or import fails.
+- **Non-PyPI repo without src/ layout:** PR description does not explain why `src/` layout was skipped.
+
+### Test 23 — Mypy configuration parity
+
+**Skip this test if master/main did not use mypy.** Record as `⏭️ Skipped (master did not use mypy)`.
+
+If master used mypy, it must be retained across all four surfaces: quality dependency group, tox env, CI toxenv matrix, and Makefile target. Being present in only some of these is not enough — the CI matrix entry is what makes CI actually execute mypy.
+
+**Step 1 — Detect mypy use on master:**
+
+```bash
+echo "=== requirements files ==="
+for f in quality.in dev.in test.in; do
+  git show master:requirements/$f 2>/dev/null | grep -i mypy && echo "(found in $f)"
+done || echo "(not in requirements files)"
+
+echo "=== CI workflow ==="
+git show master:.github/workflows/python-tests.yml 2>/dev/null | grep -i mypy || \
+git show master:.github/workflows/ci.yml 2>/dev/null | grep -i mypy || echo "(not in CI)"
+
+echo "=== Makefile ==="
+git show master:Makefile 2>/dev/null | grep -E '^mypy:' || echo "(no make mypy target on master)"
+```
+
+If none of the above finds mypy, stop and record as skipped.
+
+**Step 2 — Verify mypy in quality dependency group:**
+
+```bash
+python3 -c "
+import tomllib
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+quality = [str(d) for d in data.get('dependency-groups', {}).get('quality', [])]
+has_mypy = any('mypy' in d.lower() for d in quality)
+print('OK: mypy in quality group' if has_mypy else 'FAIL: mypy missing from quality group')
+"
+```
+
+**Step 3 — Verify mypy tox env exists:**
+
+```bash
+grep -E '\bmypy\b' tox.ini && echo "OK: mypy tox env found" || echo "FAIL: no mypy tox env in tox.ini"
+```
+
+**Step 4 — Verify mypy in CI toxenv matrix:**
+
+```bash
+CI_FILE=".github/workflows/ci.yml"
+[ ! -f "$CI_FILE" ] && CI_FILE=".github/workflows/python-tests.yml"
+grep -A30 'toxenv:' "$CI_FILE" | grep -E '\bmypy\b' \
+  && echo "OK: mypy in CI toxenv matrix" \
+  || echo "FAIL: mypy not in CI toxenv matrix — CI will not execute mypy"
+```
+
+**Step 5 — Verify make mypy target:**
+
+```bash
+grep -E '^mypy:' Makefile && echo "OK: make mypy target exists" || echo "FAIL: make mypy target missing"
+```
+
+**Pass:** Master did not use mypy (skip); OR mypy is in the quality group, has a tox env, appears in the CI toxenv matrix, and has a `make mypy` target.
+
+**Fail:** Master used mypy but any of the four surfaces is missing. Add it to whichever location is absent; re-run `uv lock` if you add it to `pyproject.toml`.
+
+### Test 24 — Versioning strategy (consolidated)
+
+Verify the versioning approach matches the release gate decision and is correctly configured throughout pyproject.toml and the build system. This test covers the complete versioning picture: PyPI-publishing repos must use setuptools-scm with dynamic version and the zero-version guard when on 0.x; no-PyPI repos must use a static version.
+
+**Skip the PyPI path (and record as `⏭️ Skipped`) only for the no-PyPI branch below.** For PyPI repos, all sub-checks (including the zero-version guard) run.
 
 ```bash
 python3 << 'PYEOF'
@@ -1751,7 +1665,7 @@ import tomllib
 import subprocess
 
 # Determine release gate (whether a PyPI publish workflow exists on master)
-check = subprocess.run(['git', 'ls-tree', 'master', '.github/workflows/'], 
+check = subprocess.run(['git', 'ls-tree', 'master', '.github/workflows/'],
                        capture_output=True, text=True)
 has_publish_wf = 'release' in check.stdout or 'publish' in check.stdout or 'pypi' in check.stdout
 gate = "pypi" if has_publish_wf else "no-pypi"
@@ -1763,9 +1677,20 @@ project = data.get('project', {})
 dynamic = project.get('dynamic', [])
 version = project.get('version')
 build_requires = data.get('build-system', {}).get('requires', [])
-scm = data.get('tool', {}).get('setuptools_scm', {})
+# Zero-version guard lives in [tool.semantic_release], NOT [tool.setuptools_scm]
+sr = data.get('tool', {}).get('semantic_release', {})
 
-# Validate versioning matches the gate
+# Shared check: setuptools must have no version specifier (parity across all openedx repos)
+import re
+for req in build_requires:
+    if re.match(r'^setuptools\s*[><=!]', req):
+        print(f"FAIL: [build-system].requires contains versioned setuptools ({req!r}) — use bare 'setuptools' for parity with other openedx repos")
+        break
+else:
+    if any(req.strip() == 'setuptools' or req.strip().startswith('setuptools ') for req in build_requires):
+        print("OK: setuptools has no version specifier in build-system.requires")
+    # If setuptools is absent entirely that's caught by the gate-specific checks below
+
 if gate == "pypi":
     has_scm = any('setuptools-scm' in req for req in build_requires)
     if not has_scm:
@@ -1773,23 +1698,27 @@ if gate == "pypi":
     elif 'version' not in dynamic:
         print("FAIL: PyPI repo must have dynamic = ['version']")
     else:
-        # Check zero-version guard for 0.x repos
-        tag_result = subprocess.run(['git', 'tag', '--sort=version:refname'], 
+        # Check zero-version guard: handle both v0.4.3 and 0.4.3 tag formats
+        tag_result = subprocess.run(['git', 'tag', '--sort=version:refname'],
                                     capture_output=True, text=True)
-        tags = [t for t in tag_result.stdout.strip().split('\n') if t and t[0].isdigit()]
-        if tags:
-            latest_tag = tags[-1].lstrip('v')
-            if latest_tag[0] == '0':
-                allow_zero = scm.get('allow_zero_version')
-                major_on_zero = scm.get('major_on_zero')
-                if allow_zero is not True or major_on_zero is not False:
-                    print("FAIL: 0.x PyPI repo missing zero-version guard (allow_zero_version=true, major_on_zero=false)")
-                else:
-                    print("OK: PyPI repo (0.x) versioned via setuptools-scm with zero-version guard")
+        tags = [t.lstrip('v') for t in tag_result.stdout.strip().split('\n')
+                if t and (t[0].isdigit() or t.startswith('v'))]
+        allow_zero = sr.get('allow_zero_version')
+        major_on_zero = sr.get('major_on_zero')
+        if not tags or tags[-1][0] == '0':
+            # 0.x repo (or no release tags yet — treat as 0.x)
+            if allow_zero is not True or major_on_zero is not False:
+                label = f"latest tag {tags[-1]!r}" if tags else "no release tags"
+                print(f"FAIL: 0.x PyPI repo ({label}) missing zero-version guard in [tool.semantic_release] — "
+                      "need allow_zero_version = true and major_on_zero = false")
             else:
-                print("OK: PyPI repo (1.x+) versioned via setuptools-scm")
+                print(f"OK: PyPI repo (0.x) versioned via setuptools-scm with zero-version guard")
         else:
-            print("OK: PyPI repo configured for setuptools-scm (no tags yet)")
+            # 1.x+ repo — zero-version guard must NOT be present
+            if allow_zero is not None or major_on_zero is not None:
+                print(f"FAIL: 1.x+ PyPI repo has spurious zero-version guard settings in [tool.semantic_release]")
+            else:
+                print("OK: PyPI repo (1.x+) versioned via setuptools-scm, no zero-version guard needed")
 else:
     if not version:
         print("FAIL: no-PyPI repo missing static version in [project]")
@@ -1800,11 +1729,20 @@ else:
 PYEOF
 ```
 
-**Pass:** PyPI repos use setuptools-scm with `dynamic = ["version"]` and include zero-version guard (allow_zero_version=true, major_on_zero=false) if on 0.x. No-PyPI repos use static `version` field (not dynamic).
+**Recovery for 0.x PyPI repo:** Add to `[tool.semantic_release]` in `pyproject.toml`:
 
-**Fail:** Versioning config does not match the release gate, or zero-version guard is missing on 0.x PyPI repos.
+```toml
+[tool.semantic_release]
+allow_zero_version = true
+major_on_zero = false
+build_command = "..."  # keep the existing build_command value
+```
 
-### Test 28 — uv run tox in CI (not bare tox)
+**Pass:** `setuptools` has no version specifier in `[build-system].requires`; PyPI repos use setuptools-scm with `dynamic = ["version"]`; 0.x repos (or repos with no release tags) also have `allow_zero_version = true` and `major_on_zero = false` in `[tool.semantic_release]`; 1.x+ repos have neither. No-PyPI repos use a static `version` field (not dynamic).
+
+**Fail:** `setuptools` carries a version specifier (e.g. `setuptools>=61.0`); versioning config does not match the release gate; zero-version guard missing on 0.x PyPI repos; or zero-version guard erroneously present on 1.x+ repos.
+
+### Test 25 — uv run tox in CI (not bare tox)
 
 Verify all CI workflows invoke `uv run tox`, not bare `tox` command. Bare `tox` fails at runtime because tox is not on PATH without the `uv run` wrapper.
 
@@ -1822,7 +1760,7 @@ echo "OK: all tox invocations use uv run"
 
 **Fail:** Any bare `tox` command found.
 
-### Test 29 — Python < 3.12 dropped
+### Test 26 — Python < 3.12 dropped
 
 Verify old Python versions (3.8, 3.9, 3.10, 3.11) were removed from tox envlist, CI matrix, and classifiers. The standardization to Python 3.12+ happens in Step 0 and must be reflected across all configuration.
 
@@ -1836,7 +1774,7 @@ grep -E 'Programming Language :: Python :: 3\.(8|9|10|11)' pyproject.toml && ech
 
 **Fail:** Old Python versions found.
 
-### Test 30 — Static dependencies declared
+### Test 27 — Static dependencies declared
 
 Verify `[project].dependencies` is a static list, not dynamic from a requirements file. This ensures package metadata is completely self-contained in pyproject.toml and not split across multiple sources.
 
@@ -1858,9 +1796,9 @@ PYEOF
 
 **Fail:** dependencies is dynamic, missing, or not a list.
 
-### Test 31 — Quality dependency group retains original linters
+### Test 28 — Quality dependency group retains original linters
 
-Verify the `quality` dependency group includes the repo's original linters (pylint, isort, pycodestyle, pydocstyle) and does not include ruff. This ensures lint behavior is preserved across the migration and confirms ruff remains out of scope per the cycle decisions.
+Verify the `quality` dependency group exists and includes the repo's original linters (pylint, isort, pycodestyle, pydocstyle). Ruff absence across the entire project is already enforced by Test 1.
 
 ```bash
 python3 << 'PYEOF'
@@ -1871,20 +1809,18 @@ quality = data.get('dependency-groups', {}).get('quality', [])
 if not quality:
     print("FAIL: quality group missing")
 else:
-    has_ruff = any('ruff' in d.lower() for d in quality)
-    has_linters = any(l in '|'.join(quality).lower() for l in ['pylint', 'isort', 'pycodestyle', 'pydocstyle'])
-    if has_ruff:
-        print("FAIL: ruff in quality group (out of scope this cycle)")
-    elif has_linters:
+    deps_str = '|'.join(str(d) for d in quality).lower()
+    has_linters = any(l in deps_str for l in ['pylint', 'isort', 'pycodestyle', 'pydocstyle'])
+    if has_linters:
         print("OK: quality group has original linters")
     else:
-        print("WARN: no standard linters detected — verify manually")
+        print("WARN: no standard linters detected — verify manually that the repo's original linters are present")
 PYEOF
 ```
 
-**Pass:** quality group exists and includes original linters (pylint, isort, pycodestyle, pydocstyle); does not include ruff.
+**Pass:** quality group exists and includes the repo's original linters (pylint, isort, pycodestyle, pydocstyle). Ruff absence is verified by Test 1.
 
-**Fail:** ruff present in quality group; or no linters when master had them.
+**Fail:** quality group is missing; or no standard linters are present when master had them.
 
 ---
 
