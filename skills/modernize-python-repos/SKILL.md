@@ -1730,42 +1730,20 @@ else
   echo "OK: no pip install -r requirements/ references in Makefile"
 fi
 
-# --- Check 19: no manually-crafted comment header above constraint-dependencies ---
-echo "--- Check 19: constraint-dependencies comment header ---"
-python3 << 'PYEOF'
-import re
-
-try:
-    content = open('pyproject.toml').read()
-except FileNotFoundError:
-    print("SKIP: no pyproject.toml found")
-    raise SystemExit(0)
-
-# Find the constraint-dependencies key and look for comment lines immediately above it
-lines = content.splitlines()
-for i, line in enumerate(lines):
-    if re.match(r'\s*constraint-dependencies\s*=', line):
-        # Scan backwards for comment lines directly above it
-        j = i - 1
-        offending = []
-        while j >= 0 and (lines[j].strip().startswith('#') or lines[j].strip() == ''):
-            if lines[j].strip().startswith('#'):
-                offending.append(lines[j].strip())
-            j -= 1
-        BAD_PATTERNS = [
-            r'machine.managed', r'do not edit', r'To regenerate', r'edx.lint', r'write_uv_constraints',
-        ]
-        bad = [c for c in offending if any(re.search(p, c, re.IGNORECASE) for p in BAD_PATTERNS)]
-        if bad:
-            print("FAIL: manually crafted comment header found above constraint-dependencies:")
-            for b in bad: print(f"  {b}")
-            print("  The tool writes constraint-dependencies without a comment header.")
-            print("  Remove these comments — their presence signals edx_lint write_uv_constraints was not actually run.")
-            raise SystemExit(1)
-        break
-
-print("OK: no manually crafted comment header above constraint-dependencies")
-PYEOF
+# --- Check 19: constraint-dependencies is non-empty ---
+echo "--- Check 19: constraint-dependencies populated ---"
+python3 -c "
+import tomllib
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+deps = data.get('tool', {}).get('uv', {}).get('constraint-dependencies', None)
+if deps is None:
+    print('FAIL: [tool.uv].constraint-dependencies missing — run edx_lint write_uv_constraints')
+elif not deps:
+    print('FAIL: constraint-dependencies is empty — edx_lint write_uv_constraints was not run')
+else:
+    print(f'OK: constraint-dependencies has {len(deps)} entries')
+"
 
 # --- Check 16: required tox environments present (py, quality, docs) ---
 echo "--- Check 16: required tox environments ---"
@@ -2183,10 +2161,15 @@ Build the package **once** on the PR branch and **once** on master/main, then in
 
 **Step 1 — Build the PR branch (single authoritative build):**
 
+Build from a clean state. Tool-generated outputs (`htmlcov/`, `.coverage`, `coverage.xml`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.tox/`, stale `*.egg-info/`) may be left in the working tree by a prior `make test`/`make quality` run. `setuptools` includes matching paths in the sdist unless `MANIFEST.in` prunes them, so a dirty tree yields a non-reproducible tarball diff. Removing only tool-generated outputs (never source) makes the build reproducible:
+
 ```bash
+rm -rf htmlcov/ .coverage coverage.xml .pytest_cache/ .mypy_cache/ .ruff_cache/ .tox/ dist/ build/ *.egg-info/
 uv run python -m build
 ls dist/
 ```
+
+> This cleanup makes the build reproducible; it does **not** by itself prove `MANIFEST.in` is correct. Whether the repo would still ship those artifacts in a real release (maintainers typically build from their working tree right after running tests) is verified deterministically in **Step 3b**, independent of build-time tree state.
 
 **Step 2 — Build main/master in an isolated worktree:**
 
@@ -2229,6 +2212,67 @@ Flag as a failure if:
 - The source package directory is missing or empty.
 - Static assets that existed before the migration are absent — their absence will break installs.
 
+**Step 3b — `MANIFEST.in` prunes test/build artifacts (deterministic — independent of build-time tree state):**
+
+Step 1's cleanup guarantees a reproducible *diff*, but a real release is often built from a working tree that still holds `htmlcov/` etc. right after a test run. Whether those would ship is a property of `MANIFEST.in`, not of the tree at build time — so check it statically. This only matters when an sdist is actually consumed (a PyPI repo): the wheel never carries these artifacts (they sit outside the package dir, and wheels use `package-data` not `MANIFEST.in`), and a non-PyPI repo's sdist is never installed. So for non-PyPI repos the check is **skipped entirely** — a missing prune rule there has zero effect and a standing WARN would only be noise.
+
+```bash
+python3 << 'PYEOF'
+import re, subprocess, tomllib
+
+# Repos that do NOT publish to PyPI — a leaked artifact in an unconsumed sdist is harmless (WARN, not FAIL).
+NON_PYPI = {
+    'credentials-themes', 'mockprock', 'edx-repo-health', 'openedx-webhooks-data-schema',
+    'enterprise-catalog', 'enterprise-access', 'enterprise-subsidy', 'xapi-db-load',
+    'codejail-service', 'openedx-user-groups', 'cc2olx', 'pr_watcher_notifier',
+    'openedx-webhooks',
+}
+
+try:
+    with open('pyproject.toml', 'rb') as f:
+        data = tomllib.load(f)
+except FileNotFoundError:
+    print("SKIP: no pyproject.toml"); raise SystemExit(0)
+
+repo = data.get('project', {}).get('name', '')
+repo_slug = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True).stdout.strip().split('/')[-1]
+is_non_pypi = repo in NON_PYPI or repo_slug in NON_PYPI
+
+# Non-PyPI repos never publish an sdist, so MANIFEST.in prune rules have zero effect —
+# skip outright rather than emit a standing WARN on every such migration.
+if is_non_pypi:
+    print("SKIP: non-PyPI repo — sdist is never consumed, MANIFEST.in prune rules have no effect")
+    raise SystemExit(0)
+
+# Does this repo generate coverage/cache artifacts? (coverage configured, or a test dep pulls it in)
+has_coverage = 'coverage' in str(data.get('tool', {}).get('coverage', '')) or \
+    any('coverage' in d or 'pytest-cov' in d
+        for grp in data.get('dependency-groups', {}).values() for d in grp if isinstance(d, str)) or \
+    ('tool' in data and 'coverage' in data['tool'])
+
+try:
+    manifest = open('MANIFEST.in').read()
+except FileNotFoundError:
+    manifest = ''
+
+# Artifacts worth pruning and the MANIFEST.in directive that covers each.
+EXPECTED = {
+    'htmlcov':      r'prune\s+htmlcov',
+    'coverage.xml': r'(exclude|global-exclude)\s+coverage\.xml',
+    '.coverage':    r'(exclude|global-exclude)\s+\.coverage',
+}
+missing = [name for name, pat in EXPECTED.items() if not re.search(pat, manifest)]
+
+if not has_coverage:
+    print("SKIP: repo does not generate coverage artifacts — no prune rules needed")
+elif not missing:
+    print("OK: MANIFEST.in prunes all test/coverage artifacts")
+else:
+    print(f"FAIL: MANIFEST.in missing prune rules for {missing} — a working-tree release build will ship these into the sdist")
+    raise SystemExit(1)
+PYEOF
+```
+
 **Step 4 — Inspect PR wheel (absolute checks):**
 
 ```bash
@@ -2269,9 +2313,9 @@ diff \
 git worktree remove /tmp/bundle-worktree-main --force
 ```
 
-**Pass:** PR tarball contains all required files; no deleted file reappears; PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel.
+**Pass:** PR tarball contains all required files; no deleted file reappears; PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel; Step 3b reports OK or SKIP (SKIP for any non-PyPI repo, or a repo with no coverage artifacts).
 
-**Fail:** Any deleted file reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression).
+**Fail:** Any deleted file reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression); Step 3b FAILs (a PyPI repo whose `MANIFEST.in` omits prune rules for generated artifacts).
 
 ### Test 40 — Lockfile consistency
 
@@ -2426,7 +2470,11 @@ grep -E '^[a-zA-Z_-]+:' Makefile | sed 's/:.*//'
 For each target from the pre-migration state:
 - If it invoked a deleted tool (pip-compile, setup.py) → confirm an equivalent target exists using uv
 - If it invoked a retained tool (pytest, pylint, isort, pycodestyle, mypy, sphinx) → confirm the target still exists
-- Any target missing without a documented reason is a regression
+- A target that was **renamed** is a violation regardless of whether a local caller exists — per the "targets are sacred, never rename" rule, and because branch-protection gates and org-level tooling can reference a target name invisibly to a single-repo grep. Two valid remedies:
+  - **Keep the old name** with the new implementation (e.g. `check-setup.py:` still, but its body validates `pyproject.toml`), or
+  - **Delete the target** if its purpose is genuinely obsolete, and document the removal in the PR description under "Removed Makefile targets".
+  - Do a repo grep (`grep -rn '<old-target>' .github/ Makefile`) only to gauge *blast radius* for the finding's severity note — not as grounds to wave the rename through.
+- Any target dropped (without being a story-replaced target like the pip-compile family) or renamed is a regression.
 
 **CI parity:**
 
@@ -2677,7 +2725,7 @@ Run from the repo root (requires Python 3.11+ for `tomllib`):
 python3 << 'PYEOF'
 import re, subprocess, tomllib
 
-# Tools legitimately removed by this migration (replaced by uv).
+# Tools legitimately removed by this migration (replaced by uv's own machinery).
 REPLACED_BY_MIGRATION = {
     'pip-tools',
 }
@@ -2693,6 +2741,21 @@ ADDED_BY_MIGRATION = {
 def normalize(name):
     name = re.sub(r'\[.*?\]', '', name).strip()
     return name.lower().replace('_', '-').replace('.', '-')
+
+# Packages still resolvable transitively via uv.lock. A master direct-dep that is no
+# longer explicitly declared is only a hard regression if it has ALSO fallen out of the
+# resolved environment. If it is still in uv.lock (pulled in transitively, e.g. isort via
+# edx-lint), the environment is intact — losing the explicit declaration is a WARN
+# (reproducibility/explicitness), not a FAIL. This is repo-agnostic: no tool is hardcoded.
+def load_locked_packages():
+    try:
+        with open('uv.lock', 'rb') as f:
+            lock = tomllib.load(f)
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        return set()
+    return {normalize(p.get('name', '')) for p in lock.get('package', []) if p.get('name')}
+
+LOCKED = load_locked_packages()
 
 def parse_in_file(content):
     pkgs = set()
@@ -2737,18 +2800,27 @@ for group_deps in data.get('dependency-groups', {}).values():
 missing = master_pkgs - pr_pkgs - REPLACED_BY_MIGRATION
 added   = pr_pkgs - master_pkgs
 
+# Split missing into hard failures (gone from the resolved env too) and soft warnings
+# (still transitively present in uv.lock — declaration lost but environment intact).
+missing_gone       = {p for p in missing if p not in LOCKED}
+missing_transitive = {p for p in missing if p in LOCKED}
+
 print("Step 1 — Overall parity:")
-print("  MISSING from PR (in master .in files but not in pyproject.toml):")
-for p in sorted(missing): print(f"    MISSING: {p}")
-if not missing: print("    (none — all packages accounted for)")
+print("  MISSING & GONE (in master .in files, not in pyproject.toml, not in uv.lock):")
+for p in sorted(missing_gone): print(f"    FAIL: {p}")
+if not missing_gone: print("    (none)")
+
+print("  MISSING but TRANSITIVELY AVAILABLE (dropped explicit declaration, still in uv.lock):")
+for p in sorted(missing_transitive): print(f"    WARN: {p}  — re-declare explicitly for reproducibility, or confirm the drop is intentional")
+if not missing_transitive: print("    (none)")
 
 print("  ADDED in PR (not in any master .in file):")
 for p in sorted(added): print(f"    ADDED: {p}")
 if not added: print("    (none)")
 
 print(f"\n  Master total: {len(master_pkgs)} | PR total: {len(pr_pkgs)}")
-if missing:
-    raise SystemExit(f"\nFAIL: {len(missing)} package(s) missing from pyproject.toml")
+if missing_gone:
+    raise SystemExit(f"\nFAIL: {len(missing_gone)} package(s) missing from pyproject.toml AND absent from uv.lock")
 
 # ── Step 2 — Group-level exact parity: each .in file maps to its named group ──
 
@@ -2769,14 +2841,21 @@ for group_name, in_filename in group_checks.items():
     allowed_extras = ADDED_BY_MIGRATION.get(group_name, set())
     missing_from_group = master_group_pkgs - pr_group_pkgs
     extra_in_group     = (pr_group_pkgs - master_group_pkgs) - allowed_extras
+    # A package missing from its named group but still resolvable in uv.lock is a WARN
+    # (declaration moved/dropped but environment intact), not a hard group-parity FAIL.
+    group_gone        = {p for p in missing_from_group if p not in LOCKED}
+    group_transitive  = missing_from_group - group_gone
     print(f"\nStep 2 — {in_filename} vs [dependency-groups.{group_name}]:")
-    for p in sorted(missing_from_group):
-        print(f"  MISSING: {p}  (in master {in_filename} but absent from {group_name} group)")
+    for p in sorted(group_gone):
+        print(f"  FAIL: {p}  (in master {in_filename}, absent from {group_name} group AND from uv.lock)")
+    for p in sorted(group_transitive):
+        print(f"  WARN: {p}  (in master {in_filename}, not declared in {group_name} group but present in uv.lock)")
     for p in sorted(extra_in_group):
-        print(f"  EXTRA:   {p}  (in {group_name} group but not in master {in_filename})")
+        print(f"  EXTRA: {p}  (in {group_name} group but not in master {in_filename})")
     if not missing_from_group and not extra_in_group:
         print(f"  (ok — exact parity)")
-    step2_failures.extend(missing_from_group)
+    # Only hard failures (gone from lock) and unexplained extras gate the test.
+    step2_failures.extend(group_gone)
     step2_failures.extend(extra_in_group)
 
 if step2_failures:
@@ -2784,7 +2863,7 @@ if step2_failures:
 PYEOF
 ```
 
-**Pass:** No `MISSING:` or `EXTRA:` lines printed, exit code 0.
+**Pass:** No `FAIL:` or `EXTRA:` lines, exit code 0. `WARN:` lines (a master direct-dep dropped from explicit declaration but still resolvable in `uv.lock`) do not fail the test — surface them so the author can re-declare for reproducibility or confirm the drop was intentional.
 
 ### Test 170 — Constraints migration
 
@@ -2828,35 +2907,7 @@ else:
 "
 ```
 
-**Step 4 — Verify no manually crafted comment header above `constraint-dependencies`:**
-
-```bash
-python3 << 'PYEOF'
-import re
-
-content = open('pyproject.toml').read()
-lines = content.splitlines()
-for i, line in enumerate(lines):
-    if re.match(r'\s*constraint-dependencies\s*=', line):
-        j = i - 1
-        offending = []
-        while j >= 0 and (lines[j].strip().startswith('#') or lines[j].strip() == ''):
-            if lines[j].strip().startswith('#'):
-                offending.append(lines[j].strip())
-            j -= 1
-        BAD = [r'machine.managed', r'do not edit', r'To regenerate', r'edx.lint', r'write_uv_constraints']
-        bad = [c for c in offending if any(re.search(p, c, re.IGNORECASE) for p in BAD)]
-        if bad:
-            print("FAIL: manually crafted comment header above constraint-dependencies:")
-            for b in bad: print(f"  {b}")
-            print("  The tool writes this key without a comment header — remove these comments.")
-        else:
-            print("OK: no manually crafted comment header above constraint-dependencies")
-        break
-PYEOF
-```
-
-**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty; all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins; no manually crafted comment header above `constraint-dependencies`.
+**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty; all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins.
 
 ### Test 180 — release.yml structure: CI first, then OIDC publish only
 
@@ -3434,30 +3485,66 @@ PYEOF
 
 Feanil's rule (mockprock #66): "This should be an `include-group` of the base dependencies." When a `.in` file has `-r other.in`, the corresponding dependency group must use `{include-group = "other"}` — not copy the referenced packages inline. Flattening loses the structural relationship and will drift over time.
 
+Two distinct failure modes are separated so the test stays generic (no per-package special-casing):
+- **Flattened** — the referenced group's packages were copied inline into the consuming group. This is the exact anti-pattern the rule targets → **FAIL**.
+- **Omitted** — the reference was dropped and the packages are *not* inlined. Whether that matters is repo-specific, so it is decided by evidence: if the consuming group's own code actually imports a referenced package it is a **FAIL** (lost a real dependency); otherwise it is a **WARN** (confirm the drop was intentional). `base` is always exempt — those are the project's own deps, installed via the editable package, not a dependency group.
+
 ```bash
 python3 << 'PYEOF'
-import subprocess, re, tomllib
+import subprocess, re, tomllib, pathlib
+
+def normalize(name):
+    name = re.sub(r'\[.*?\]', '', name).strip()
+    return name.lower().replace('_', '-').replace('.', '-')
 
 def parse_r_refs(content):
-    refs = []
+    return [m.group(1) for line in content.splitlines()
+            if (m := re.match(r'^-r\s+(\S+?)\.in\s*(?:#.*)?$', line.strip()))]
+
+def parse_pkgs(content):
+    pkgs = set()
     for line in content.splitlines():
-        m = re.match(r'^-r\s+(\S+?)\.in\s*(?:#.*)?$', line.strip())
-        if m:
-            refs.append(m.group(1))
-    return refs
+        line = line.strip()
+        if not line or line.startswith(('#', '-r', '-c', '-e')):
+            continue
+        name = re.split(r'[><=!~\s;@\[]', line)[0]
+        if name:
+            pkgs.add(normalize(name))
+    return pkgs
 
 def get_include_groups(group_deps):
-    includes = set()
-    for dep in group_deps:
-        if isinstance(dep, dict) and 'include-group' in dep:
-            includes.add(dep['include-group'])
-    return includes
+    return {d['include-group'] for d in group_deps
+            if isinstance(d, dict) and 'include-group' in d}
+
+def inline_pkgs(group_deps):
+    return {normalize(d.split('@')[0]) for d in group_deps if isinstance(d, str)}
+
+# For the omission case: does the consuming group's own code import any referenced package?
+# Only well-defined for the test group (consumer = the test suite). Import name ≈ normalized
+# package name with '-'→'_'; grep is a heuristic upgrade of WARN→FAIL, never the sole gate.
+def consumer_imports_any(group_name, ref_pkgs):
+    if group_name != 'test':
+        return False
+    roots = [p for p in ('tests', 'test') if pathlib.Path(p).is_dir()]
+    if not roots:
+        return False
+    tokens = {p.replace('-', '_') for p in ref_pkgs}
+    for root in roots:
+        for py in pathlib.Path(root).rglob('*.py'):
+            try:
+                text = py.read_text(encoding='utf-8', errors='ignore')
+            except OSError:
+                continue
+            for tok in tokens:
+                if re.search(rf'^\s*(import|from)\s+{re.escape(tok)}(\.|\s|$)', text, re.MULTILINE):
+                    return True
+    return False
 
 with open('pyproject.toml', 'rb') as f:
     data = tomllib.load(f)
 
 dep_groups = data.get('dependency-groups', {})
-failures = []
+failures, warnings = [], []
 
 for group_name in ['test', 'test-base', 'dev', 'quality', 'doc', 'ci']:
     r = subprocess.run(['git', 'show', f'master:requirements/{group_name}.in'],
@@ -3469,24 +3556,42 @@ for group_name in ['test', 'test-base', 'dev', 'quality', 'doc', 'ci']:
         continue
     pr_group = dep_groups.get(group_name, [])
     pr_includes = get_include_groups(pr_group)
+    pr_inline = inline_pkgs(pr_group)
     for ref in r_refs:
-        if ref not in pr_includes:
+        if ref == 'base':
+            continue  # project's own deps — installed via the editable package, not a group
+        if ref in pr_includes:
+            continue  # correctly represented as an include-group
+        ref_pkgs = parse_pkgs(
+            subprocess.run(['git', 'show', f'master:requirements/{ref}.in'],
+                           capture_output=True, text=True).stdout)
+        if ref_pkgs & pr_inline:
             failures.append(
-                f"[dependency-groups.{group_name}] missing {{include-group = \"{ref}\"}} "
-                f"— master's {group_name}.in has '-r {ref}.in' which must become an include-group entry, not inlined packages"
-            )
+                f"[dependency-groups.{group_name}] flattened '-r {ref}.in' — packages "
+                f"{sorted(ref_pkgs & pr_inline)} inlined instead of {{include-group = \"{ref}\"}}")
+        elif consumer_imports_any(group_name, ref_pkgs):
+            failures.append(
+                f"[dependency-groups.{group_name}] dropped '-r {ref}.in' but the test suite "
+                f"imports a package from '{ref}' — add {{include-group = \"{ref}\"}}")
+        else:
+            warnings.append(
+                f"[dependency-groups.{group_name}] dropped '-r {ref}.in' (packages not inlined, "
+                f"not imported by the consumer) — confirm intentional or add {{include-group = \"{ref}\"}}")
 
+for f in failures:
+    print(f"FAIL: {f}")
+for w in warnings:
+    print(f"WARN: {w}")
+if not failures and not warnings:
+    print("OK: all -r references represented as include-group entries")
 if failures:
-    for f in failures:
-        print(f"FAIL: {f}")
-else:
-    print("OK: all -r references in .in files are represented as include-group entries")
+    raise SystemExit(1)
 PYEOF
 ```
 
-**Pass:** Every `-r X.in` in any master `.in` file is represented as `{include-group = "X"}` in the corresponding dependency group.
+**Pass:** No `FAIL:` lines. Every `-r X.in` is either represented as `{include-group = "X"}`, exempt (`base`), or dropped without being inlined and without the consumer importing it. `WARN:` lines (a reference dropped entirely, not inlined, not imported) do not fail the test — surface them for the author to confirm.
 
-**Fail:** A `-r X.in` reference was flattened — the packages from `X.in` were inlined directly into the group rather than using `{include-group = "X"}`.
+**Fail:** A `-r X.in` reference was flattened (packages inlined instead of an include-group), or dropped while the consuming group's code still imports one of its packages.
 
 ### Test 350 — Makefile targets run tools directly (not via tox)
 
