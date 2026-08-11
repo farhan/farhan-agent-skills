@@ -13,15 +13,19 @@ If no argument is provided, use the default subject: `chore: Upgrade Python requ
 ## Step 1 — Fetch Emails
 
 Determine the date range for the current week:
-- If today is Monday, the range is **last Tuesday through today (inclusive)** — i.e. 6 days back to today.
-- If today is not Monday, calculate the most recent past Monday and use **the Tuesday before that Monday through that Monday** as the range.
+- If today is **Monday**, the range is **last Tuesday through today (inclusive)** — i.e. 6 days back to today. This captures the full Tue–Mon cycle.
+- If today is **not Monday**, use **the most recent Tuesday through today (inclusive)**. "Most recent Tuesday" means: go back from today until you hit a Tuesday (if today is Tuesday, that's today itself).
 
-This ensures emails arriving any day of the week (Tue–Mon) are captured, not just those arriving on Monday.
+Examples:
+- Monday July 28 → last Tuesday = July 22 → range: July 22–July 28
+- Sunday July 27 → most recent Tuesday = July 22 → range: July 22–July 27
+- Friday July 25 → most recent Tuesday = July 22 → range: July 22–July 25
+- Tuesday July 22 → today is Tuesday → range: July 22–July 22
 
 Search Gmail using the Gmail MCP tool with a query like:
 `subject:"<keyword>" after:YYYY/MM/DD before:YYYY/MM/DD+1`
 
-where `after` is the Tuesday start date and `before` is the day after Monday (to make the range inclusive).
+where `after` is the Tuesday start date and `before` is the day after today (to make the range inclusive).
 
 List the found email threads in a clean table. **Always start with a serial-number column (`S.No`) as the first column, and include a `Major Upgrades` column** listing any packages flagged for manual review / major version bumps (the bot marks these `[MAJOR]`; write `—` if none):
 | S.No | Repo | PR # | PR URL | Packages Flagged | Major Upgrades |
@@ -59,9 +63,23 @@ gh pr review <url> --approve
 
 ---
 
-## Step 3 — Spawn Parallel Fix Agents for All Failing PRs
+## Step 3 — Handle Failing PRs
 
-For every PR categorised as **Failing**, immediately spawn a background Agent — **no user approval needed, no questions asked**. Launch all agents in a single message so they run in parallel.
+### 3a — Re-run first for known-flaky repos
+
+For the following repos, **always try re-running the failing job before spawning a fix agent**:
+- `openedx/xblocks-core` — JS tests are known to be flaky; a re-run usually fixes them.
+
+To re-run a failing job:
+```
+gh run rerun <run_id> --job <job_id> --repo <owner>/<repo>
+```
+
+After re-running, note in the status table that a re-run was triggered and move on — do **not** spawn a fix agent yet. If the re-run also fails, then treat it as a genuine failure and spawn a fix agent.
+
+### 3b — Spawn Parallel Fix Agents for All Other Failing PRs
+
+For every other PR categorised as **Failing** (and for re-run failures from 3a), immediately spawn a background Agent — **no user approval needed, no questions asked**. Launch all agents in a single message so they run in parallel.
 
 Each agent receives this prompt (fill in the specifics per PR):
 
