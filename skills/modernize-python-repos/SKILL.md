@@ -8,6 +8,12 @@ description: >
 allowed-tools: Read Glob Grep Bash Write Edit
 ---
 
+> **STRICT MODE — execute every step in order.**
+> Before starting each step, state: `"Step <number>: <title> — starting"`.
+> After completing each step, state: `"Step <number>: <title> — done"`.
+> Do not skip, combine, reorder, or silently omit any step.
+> If a step cannot be completed, stop and report the blocker before moving on.
+
 # Modernize Python Repos
 
 ## Step 0 — Identify and confirm the target repo
@@ -86,7 +92,8 @@ git status && git log --oneline -5
 #    Non-PyPI repos (never published to PyPI):
 #      credentials-themes, mockprock, edx-repo-health, openedx-webhooks-data-schema,
 #      enterprise-catalog, enterprise-access, enterprise-subsidy, xapi-db-load,
-#      codejail-service, openedx-user-groups, cc2olx, pr_watcher_notifier
+#      codejail-service, openedx-user-groups, cc2olx, pr_watcher_notifier,
+#      openedx-webhooks
 #    All other repos → PyPI repo (release gate: yes)
 git remote get-url origin 2>/dev/null
 
@@ -104,6 +111,7 @@ grep -E '^[a-zA-Z_-]+:' Makefile 2>/dev/null
 
 # 7. Stale file check
 for f in .coveragerc CHANGELOG.rst; do [ -f "$f" ] && echo "EXISTS: $f" || echo "absent: $f"; done
+# Note: CHANGELOG.rst is NOT deleted for PyPI repos — it is created/updated with the PSR insertion marker in Step 3.4.
 
 # 8. Current version
 git show HEAD:setup.cfg 2>/dev/null | grep 'version\s*='
@@ -246,9 +254,6 @@ Homepage = "https://github.com/openedx/<repo-name>"
 Repository = "https://github.com/openedx/<repo-name>"
 
 [dependency-groups]
-# Each group mirrors its requirements/*.in file exactly.
-# Adapt groups to match the actual .in files present in the repo.
-# "-r other.in" → {include-group = "other"}; "-c constraints.txt" → skip (handled via uv_constraints)
 test-base = [
     # packages from test.in minus Django — used when multiple Django versions are tested
 ]
@@ -332,11 +337,6 @@ fallback_version = "0.0.0.dev0"
 conflicts = [
     [{group = "test"}, {group = "django42"}],
 ]
-#  DO NOT EDIT constraint-dependencies DIRECTLY.
-#  This list is managed by `edx_lint write_uv_constraints`
-#  and will be overwritten the next time `make upgrade` is run.
-#  - GLOBAL constraints: edit edx_lint/files/common_constraints.txt
-#  - REPO-SPECIFIC constraints: edit [tool.edx_lint].uv_constraints in this file
 constraint-dependencies = []
 
 [tool.edx_lint]
@@ -368,7 +368,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = ""                        # from setup.cfg [metadata] name
-version = ""                     # copy exactly from setup.cfg — bump manually at release
+version = ""                     # fetch from master: check setup.cfg [metadata] version=,
+                                 # then setup.py (look for version= or __version__ import),
+                                 # then package __init__.py (__version__ = "x.y.z")
+                                 # bump manually at each release
 description = ""
 requires-python = ">=3.12"
 license = "AGPL-3.0"
@@ -388,8 +391,7 @@ keywords = [
     "edx",
 ]
 
-dynamic = ["readme"]
-# readme = "README.rst"          # ← do NOT set this as static when "readme" is in dynamic above
+readme = "README.rst"
 
 dependencies = [
     # copy from requirements/base.in — static list
@@ -402,9 +404,6 @@ Repository = "https://github.com/openedx/<repo-name>"
 [tool.setuptools]
 include-package-data = true
 
-[tool.setuptools.dynamic]
-readme = {file = ["README.rst"], content-type = "text/x-rst"}
-
 [tool.setuptools.packages.find]
 exclude = ["tests*", "*.tests", "*.tests.*"]
 # No src/ layout for non-PyPI repos
@@ -416,12 +415,7 @@ exclude = ["tests*", "*.tests", "*.tests.*"]
 
 [tool.uv]
 package = true
-#  DO NOT EDIT constraint-dependencies DIRECTLY.
-#  This list is managed by `edx_lint write_uv_constraints`
-#  and will be overwritten the next time `make upgrade` is run.
-#  - GLOBAL constraints: edit edx_lint/files/common_constraints.txt
-#  - REPO-SPECIFIC constraints: edit [tool.edx_lint].uv_constraints in this file
-constraint-dependencies = []     # populated by `edx_lint write_uv_constraints`
+constraint-dependencies = []
 
 [tool.edx_lint]
 # Repo-specific uv constraints merged with edx-lint's global constraints.
@@ -539,20 +533,25 @@ uv run python -m build
 - **PyPI repo:** Move the package directory under `src/` (e.g. `src/<package_name>/`). This is the expected layout for PyPI packages. If the move is unusually complex, skip it and document in `## Important Notes` of the PR.
 - **Non-PyPI repo:** Do NOT move to `src/` layout. Document in `## Important Notes` of the PR: "This repo does not publish to PyPI, so `src/` layout was not adopted."
 
-#### 1.4 — Remove hardcoded `__version__`
+#### 1.4 — Handle `__version__`
 
-If master has `__version__ = "..."` hardcoded in a package `__init__.py`:
+**Always keep `__version__` in the package `__init__.py` via `importlib.metadata` — as a norm, regardless of whether other code currently imports it.** This is the expected pattern across all Open edX repos.
 
-- **PyPI repo:** Remove it — version is now derived from git tags via setuptools-scm.
-- **If genuinely needed at runtime** (other code imports it): replace with:
-  ```python
-  from importlib.metadata import version, PackageNotFoundError
-  try:
-      __version__ = version("<package-name>")
-  except PackageNotFoundError:
-      __version__ = "unknown"
-  ```
-- **Non-PyPI repo:** Either remove it and update `[project] version` to match, or keep it — but do NOT have two different versions in pyproject.toml and `__init__.py`.
+Use this exact block for both PyPI and non-PyPI repos:
+
+```python
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("<package-name>")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "unknown"
+```
+
+The `# pragma: no cover` is **required** on the `except` line — the package is always installed during test runs, so this branch is unreachable in tests and will cause codecov failures if not excluded.
+
+- **PyPI repo:** The hardcoded `__version__ = "x.y.z"` string is removed; the value is now derived from git tags via setuptools-scm at build time and from package metadata at runtime.
+- **Non-PyPI repo:** The hardcoded string is replaced with the same importlib.metadata pattern. Also update any caller (e.g. `docs/conf.py`) to use `importlib.metadata.version("<package-name>")` instead of reading the source file with a regex.
 
 ---
 
@@ -581,18 +580,12 @@ Do **not** add packages that are not in the `.in` file, and do **not** drop pack
 
 ```toml
 [dependency-groups]
-# Each group mirrors its requirements/*.in file exactly.
-# "-r other.in" in the .in file → {include-group = "other"} here.
-# Direct packages → listed verbatim.
-
-# From requirements/test.in (add Django matrix entries below if needed):
 test = [
     # direct packages from test.in
     "coverage",
     "pytest",
     "pytest-cov",
     "pytest-django",
-    # "-r base.in" → {include-group = "base"} (if present in test.in)
     # Django pinned to the highest version tested:
     "Django>=5.2,<6.0",
 ]
@@ -604,34 +597,30 @@ test = [
 # django42   = [{include-group = "test-base"}, "Django>=4.2,<5.0"]
 # Use this split ONLY when multiple Django versions are tested.
 
-# From requirements/quality.in — retain master's linters EXACTLY (NO ruff):
 quality = [
-    # "-r test.in" → {include-group = "test"} (if quality.in includes test.in)
     {include-group = "test"},
-    # direct packages from quality.in:
+    # direct packages from quality.in — retain master's linters EXACTLY (NO ruff):
     "edx-lint",
     "isort",
     "pycodestyle",
     # add others only if they appear in quality.in
 ]
 
-# From requirements/doc.in:
 doc = [
-    # "-r test.in" → {include-group = "test"} (if doc.in includes test.in)
     {include-group = "test"},
     # direct packages from doc.in:
+    "build",
+    "doc8",
     "Sphinx",
     "sphinx-book-theme",
 ]
 
-# From requirements/ci.in (create with tox + tox-uv if ci.in does not exist):
 ci = [
-    # direct packages from ci.in — typically just:
+    # typically just tox + tox-uv; create this group if ci.in does not exist:
     "tox",
     "tox-uv",
 ]
 
-# From requirements/dev.in — exact mirror; "-r X.in" → {include-group = "X"}:
 dev = [
     {include-group = "quality"},  # only if dev.in has "-r quality.in"
     {include-group = "ci"},       # only if dev.in has "-r ci.in"
@@ -639,6 +628,8 @@ dev = [
     # direct packages from dev.in (those not already included via "-r"):
 ]
 ```
+
+> **After writing the `doc` group**, cross-check it against what `tox -e docs` actually runs. If any Makefile target or tox command invokes a tool (e.g. `doc8`, `sphinx-apidoc`, `twine`) that is not in `doc.in` and not in the `doc` group, add it explicitly. Missing tools cause a silent "command not found" failure when `tox -e docs` runs.
 
 **Group mapping rules:**
 - `requirements/base.in` → `[project].dependencies` (runtime deps — never a dependency group)
@@ -674,11 +665,13 @@ uv_constraints = [
 
 If constraints.txt has no repo-specific pins (only global edx-lint constraints), use `uv_constraints = []`.
 
-Then populate `[tool.uv].constraint-dependencies` automatically — never edit it by hand:
+Then populate `[tool.uv].constraint-dependencies` automatically — never edit it by hand, and **never add any comment above the `constraint-dependencies` key**:
 
 ```bash
 uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml
 ```
+
+The tool writes `constraint-dependencies` without a comment header. Any explanatory comment block placed above that key (e.g. `# machine-managed by edx-lint`, `# To regenerate, run:`) is a reviewer signal that the command was not actually run and the section was crafted manually instead.
 
 #### 2.3 — Generate uv.lock
 
@@ -696,7 +689,7 @@ Replace tox.ini using the **Makefile → tox → CI** tooling flow: tox provides
 
 ```ini
 [tox]
-envlist = py312-django{42,52}, lint, docs
+envlist = quality, docs, py312-django{42,52}
 requires = tox-uv>=1
 
 [testenv]
@@ -711,12 +704,12 @@ allowlist_externals = make
 commands =
     make test-with-coverage   # use whatever the test target is on master
 
-[testenv:lint]
+[testenv:quality]
 runner = uv-venv-lock-runner
 dependency_groups = quality
 allowlist_externals = make
 commands =
-    make lint
+    make quality
 
 [testenv:docs]
 runner = uv-venv-lock-runner
@@ -731,6 +724,7 @@ commands =
 - If master tests only one Django version: use `dependency_groups = test` with a plain `[testenv]` (no matrix)
 - If master has extra envs (e.g. `pii_check`, `translations`): add them, keeping same commands, using `runner = uv-venv-lock-runner` and the appropriate `dependency_groups`
 - **Do NOT rename any environment** that master's tox.ini defines
+- **Always add `[testenv:docs]`** — it is a required CI environment for all repos. Omit it only when the repo has no docs infrastructure whatsoever (no `docs/` directory, no `make docs` target, no Sphinx configuration) AND document the omission in `## Important Notes` of the PR with the specific reason.
 
 #### 2.5 — Update Makefile
 
@@ -739,16 +733,35 @@ Only update the two targets the story changes. Everything else stays exactly as-
 ```makefile
 requirements: ## install development environment requirements
 	uv sync --group dev
-	uv tool install tox --with tox-uv
 
 upgrade: ## update python dependencies
 	uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml
 	uv lock --upgrade
 ```
 
+**Do NOT add `uv tool install tox --with tox-uv` to the `requirements` target.** CI uses `uv sync --group ci` + `uv run tox` (the locked, pinned tox from the `ci` dependency group). Installing a separate unpinned global tox via `uv tool install` is redundant and creates a version mismatch footgun — the global tox is outside `uv.lock` and can silently drift.
+
 **Drop** only these targets (they are directly replaced by the story):
 - `compile-requirements` — replaced by `uv lock`
 - Any other pip-compile or `requirements/*.txt` generation targets
+
+**Migrate ALL other targets that reference `requirements/*.txt`** — deleting `requirements/` breaks any target still calling `pip install -r requirements/*.txt`. Before touching any file, scan for them:
+
+```bash
+grep -n 'pip install.*requirements/' Makefile 2>/dev/null
+```
+
+For each hit, replace the `pip install -r` line using this mapping — **match the scope exactly, do not upgrade to a broader group**:
+
+| Old command | Correct replacement |
+|---|---|
+| `pip install -r requirements/base.txt` | `uv sync` (no group — runtime deps only from `[project].dependencies`) |
+| `pip install -r requirements/test.txt` | `uv sync --group test` |
+| `pip install -r requirements/quality.txt` | `uv sync --group quality` |
+| `pip install -r requirements/doc.txt` | `uv sync --group doc` |
+| `pip install -r requirements/dev.txt` | `uv sync --group dev` |
+
+**Do NOT map a narrow-scope target (e.g. `base_requirements`) to `uv sync --group dev`.** That installs all dev/test/quality packages where only runtime deps were intended.
 
 **Keep and do not rename** everything else: `lint`, `test`, `test-with-coverage`, `docs`, and all other targets on master. Their implementations can stay as-is — they call the linters/pytest directly, and tox manages the environment around them.
 
@@ -789,10 +802,10 @@ jobs:
       fail-fast: true
       matrix:
         python-version: ["3.12"]
-        # If no Django matrix: use "py" (not "py312") — the python-version entry drives
-        # the interpreter; using "py312" hardcodes the version in two places.
-        # If Django matrix: use named envs like "django42", "django52".
-        toxenv: [lint, docs, py]   # ← no Django: use "py"; with Django: [lint, docs, django42, django52]
+        toxenv: [quality, docs, py]   # ← no Django: py; with Django: [quality, docs, django42, django52]
+                                      # py, quality, and docs are required; omit docs only if the repo
+                                      # has no docs infrastructure (no docs/ dir, no make docs, no Sphinx)
+                                      # and document the omission in ## Important Notes of the PR
 
     steps:
       - name: Checkout repository
@@ -811,9 +824,9 @@ jobs:
         run: uv run tox -e ${{ matrix.toxenv }}
 
       - name: Upload coverage to Codecov
-        # Condition must reference the EXACT toxenv name used in the matrix above.
-        # No Django matrix → "py". Django matrix → highest version, e.g. "django52".
-        if: matrix.toxenv == 'py'
+        # Compound condition: toxenv name + python-version to pin the exact job.
+        # No Django matrix → py. Django matrix → highest version, e.g. django52.
+        if: matrix.toxenv == 'py' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@<SHA_FROM_MASTER_OR_LATEST> # vX.Y.Z
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -824,12 +837,13 @@ jobs:
 **Parity rules:**
 - SHA-pin ALL actions — no mutable version tags (e.g. `@v4`)
 - **Never downgrade a SHA** — for any action already on master, use its exact SHA or a newer one. Running with an older SHA than master is a regression.
-- **`py` vs `py312` rule (hard rule, no exceptions):** For the bare Python test environment (no Django suffix), always use `toxenv: [py]` in the CI matrix — never `py312` or any version-specific name. The `python-version` matrix entry drives the interpreter; `py` lets tox resolve the right env automatically. Named envs like `django42`, `lint`, `docs` are unaffected — only the bare Python test env must be `py`.
-- **Codecov `if:` condition must match the actual toxenv name** — if the matrix uses `py`, the condition is `matrix.toxenv == 'py'`; if it uses `django52`, it's `matrix.toxenv == 'django52'`. Never leave a stale `py312` or `django52` reference when the matrix uses a different name.
+- **Use `py` for the bare Python test env** (no Django suffix). The `python-version` matrix entry drives the interpreter. With Django matrix: use `django42`, `django52` etc.
+- **Codecov `if:` condition** — use a compound condition that pins both the env name and the Python version: `if: matrix.toxenv == 'py' && matrix.python-version == '3.12'`. For Django matrix: `if: matrix.toxenv == 'django52' && matrix.python-version == '3.12'`.
 - Keep any `env:` variables or step conditions from master's CI (e.g. `DJANGO_SETTINGS_MODULE`)
 - If master's CI checked branch protection under specific job names, the new `name:` field on the matrix job must match exactly — check with repo owner before changing
 - If master had no Codecov step, do not add one
 - Do not add an `actions/setup-python` step — `astral-sh/setup-uv` handles Python installation via `python-version`
+- **Never use `uv pip install` to override Django (or any package) version in CI.** `uv pip install "django~=X.Y.0"` bypasses the lockfile and is an anti-pattern for this modernization work. Django version selection must happen entirely through `uv sync --group djangoXY` or `uv run tox -e djangoXY` — both of which pull the pinned version from `uv.lock`. If you see a step like `uv pip install "django~=${{ matrix.django-version }}.0"` on master, replace it with the correct `uv sync --group ...` approach.
 - **`codecov.yml` — do not create if absent.** Do not introduce a `codecov.yml` file if it does not already exist on master/main — an empty or header-only file adds noise with no value. If the repo already has one, read it (`git show master:codecov.yml`) and copy its settings verbatim; do not add any threshold, target, or key that is not already there (in particular, do not invent `coverage.status.patch.target` or any numeric threshold).
 
 ---
@@ -847,6 +861,10 @@ jobs:
 #### 3.1 — Add semantic-release config to pyproject.toml
 
 ```toml
+[tool.semantic_release.changelog]
+mode = "update"
+insertion_flag = ".. changelog-insertion-marker"
+
 [tool.semantic_release]
 build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION python -m build"
 
@@ -893,15 +911,14 @@ jobs:
 
       - name: Run Semantic Release
         id: release
-        uses: python-semantic-release/python-semantic-release@SHA_VERSION # TODO: Update master version or latest version
+        uses: python-semantic-release/python-semantic-release@v<PSR_VERSION>
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           git_committer_name: "github-actions"
           git_committer_email: "actions@users.noreply.github.com"
-          changelog: "false"
 
       - name: Upload to GitHub Release Assets
-        uses: python-semantic-release/publish-action@SHA_VERSION # TODO: Update master version or latest version
+        uses: python-semantic-release/publish-action@v<PSR_VERSION>
         if: steps.release.outputs.released == 'true'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -936,14 +953,24 @@ jobs:
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@VERSION # TODO: Use Numeric or SHA whatever present on the master
+        uses: pypa/gh-action-pypi-publish@<VERIFIED_COMMIT_SHA> # v<VERSION>
         # No user/password — OIDC trusted publisher. Configure on PyPI before merging.
 ```
 
-Get the current SHA for `pypa/gh-action-pypi-publish`:
+Get the current verified **commit** SHA for `pypa/gh-action-pypi-publish` (must be a real commit SHA, not a tag-object SHA):
 ```bash
-gh api repos/pypa/gh-action-pypi-publish/git/ref/heads/release/v1 --jq '.object.sha'
+# Get the latest release tag
+gh api repos/pypa/gh-action-pypi-publish/releases/latest --jq '.tag_name'
+# Then resolve to a real commit SHA (not the tag object SHA):
+gh api repos/pypa/gh-action-pypi-publish/commits/<TAG> --jq '.sha'
+# Verify it resolves (returns 200, not 422):
+gh api repos/pypa/gh-action-pypi-publish/commits/<SHA> --jq '.sha'
 ```
+
+**SHA pinning rules for release.yml:**
+- `pypa/gh-action-pypi-publish` — **must use a verified commit SHA** (not a floating tag). A floating `@release/v1` branch on this action caused a real production incident; SHA-pinning is non-negotiable here. Verify the SHA resolves via `gh api .../commits/<sha>` before using it.
+- `python-semantic-release/python-semantic-release` and `python-semantic-release/publish-action` — use **floating version tags** (e.g. `@v10.6.1`), not SHA pins. These actions run only on push to default branch (never in PR CI), so a supply-chain SHA pin adds friction without meaningful protection. `openedx/XBlock`'s reference implementation uses floating tags for PSR actions.
+- All other actions (e.g. `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`) — **SHA-pin as usual**.
 
 If master had a legacy `pypi-publish.yml` or similar workflow: `git rm .github/workflows/pypi-publish.yml`.
 
@@ -964,13 +991,18 @@ jobs:
     uses: openedx/.github/.github/workflows/commitlint.yml@master
 ```
 
-#### 3.4 — Delete CHANGELOG.rst
+#### 3.4 — Create or update CHANGELOG.rst
 
-python-semantic-release publishes via GitHub Releases (`changelog: "false"`), making CHANGELOG.rst redundant.
+python-semantic-release will auto-generate and update `CHANGELOG.rst` on every release using the insertion marker. Create or overwrite it with:
 
-```bash
-git rm CHANGELOG.rst
+```rst
+.. This file is auto-managed by python-semantic-release.
+   Do not edit manually — changes will be overwritten on the next release.
+
+.. changelog-insertion-marker
 ```
+
+If `CHANGELOG.rst` already exists on master with real content, prepend these two lines at the very top and add `.. changelog-insertion-marker` below any existing header. Do not discard existing release notes.
 
 ---
 
@@ -997,8 +1029,7 @@ git rm -r requirements/ 2>/dev/null || true
 # Delete only if it existed on master:
 git rm .coveragerc 2>/dev/null || true
 
-# Delete only for PyPI repos (Phase 3):
-git rm CHANGELOG.rst 2>/dev/null || true
+# NEVER delete CHANGELOG.rst — for PyPI repos, Step 3.4 creates/updates it with the PSR insertion marker.
 
 # NEVER delete — ruff is out of scope:
 # pylintrc, pylintrc_tweaks — leave exactly as on master
@@ -1063,7 +1094,7 @@ else
   echo "OK: fail-fast is not false"
 fi
 
-# --- Check 2: toxenv must not use bare py3XX in CI matrix ---
+# --- Check 2: toxenv must not use bare py3XX version-specific names ---
 echo "--- Check 2: toxenv py vs py3XX ---"
 python3 << 'PYEOF'
 import re, glob
@@ -1102,14 +1133,17 @@ if not toxenv_match:
 
 toxenv_values = [t.strip().strip('"').strip("'") for t in toxenv_match.group(1).split(',')]
 
-# Find Codecov condition
+# Find Codecov condition — must be compound: matrix.toxenv == 'X' && matrix.python-version == 'Y'
 codecov_match = re.search(r"if:\s*matrix\.toxenv\s*==\s*['\"]([^'\"]+)['\"]", content)
 if codecov_match:
     condition_toxenv = codecov_match.group(1)
+    has_pyver = bool(re.search(r"matrix\.python-version\s*==", content))
     if condition_toxenv not in toxenv_values:
         print(f"FAIL: Codecov condition references '{condition_toxenv}' but matrix has {toxenv_values}")
+    elif not has_pyver:
+        print(f"FAIL: Codecov condition is missing matrix.python-version check — use compound: matrix.toxenv == '{condition_toxenv}' && matrix.python-version == '3.12'")
     else:
-        print(f"OK: Codecov condition '{condition_toxenv}' matches matrix entry")
+        print(f"OK: Codecov condition '{condition_toxenv}' with python-version check matches matrix entry")
 else:
     print("OK: no Codecov step (or no matrix.toxenv condition found)")
 PYEOF
@@ -1230,6 +1264,572 @@ else
   echo "OK: ruff absent"
 fi
 
+# --- Check 9: setup.py/setup.cfg migration parity ---
+echo "--- Check 9: setup.py/setup.cfg migration parity ---"
+python3 << 'PYEOF'
+import re, subprocess, tomllib, configparser
+
+FAIL = "FAIL"; WARN = "WARN"; INFO = "info"
+findings = []
+def add(sev, msg): findings.append((sev, msg))
+
+BASE = None
+for b in ("main", "master"):
+    r = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{b}"], capture_output=True)
+    if r.returncode == 0:
+        BASE = b; break
+if not BASE:
+    for remote in ("upstream", "origin"):
+        for b in ("main", "master"):
+            r = subprocess.run(["git", "ls-remote", "--exit-code", "--heads", remote, b], capture_output=True)
+            if r.returncode == 0:
+                BASE = f"{remote}/{b}"; break
+        if BASE: break
+if not BASE:
+    print("SKIP: no main/master branch found"); raise SystemExit(0)
+
+def git_show(path):
+    r = subprocess.run(["git", "show", f"{BASE}:{path}"], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+def extract_setup_py_field(content, field):
+    if not content: return None
+    m = re.search(rf'{field}\s*=\s*\[([^\]]+)\]', content, re.DOTALL)
+    if m: return re.findall(r'["\']([^"\']+)["\']', m.group(1)) or None
+    m = re.search(rf'{field}\s*=\s*["\']([^"\']+)["\']', content)
+    return m.group(1) if m else None
+
+try:
+    with open("pyproject.toml", "rb") as f: toml = tomllib.load(f)
+except Exception as e:
+    print(f"FAIL: cannot read pyproject.toml — {e}"); raise SystemExit(1)
+
+project = toml.get("project", {}); tool = toml.get("tool", {})
+setup_cfg = git_show("setup.cfg"); setup_py = git_show("setup.py"); coveragerc = git_show(".coveragerc")
+cfg = configparser.ConfigParser()
+if setup_cfg: cfg.read_string(setup_cfg)
+
+def cfg_meta(key):
+    for section in ("metadata", "options"):
+        if cfg.has_section(section) and cfg.has_option(section, key):
+            return cfg.get(section, key).strip()
+    return extract_setup_py_field(setup_py, key)
+
+master_name = cfg_meta("name"); pr_name = project.get("name", "")
+if master_name and pr_name and master_name.replace("_","-").lower() != pr_name.replace("_","-").lower():
+    add(FAIL, f"[project].name mismatch: master={master_name!r} PR={pr_name!r}")
+elif not pr_name: add(FAIL, "[project].name missing")
+
+if cfg_meta("description") and not project.get("description"):
+    add(FAIL, f"[project].description missing")
+
+master_py = cfg_meta("python_requires")
+if master_py and not project.get("requires-python"):
+    add(FAIL, f"[project].requires-python missing (master had: {master_py!r})")
+
+master_license = cfg_meta("license")
+if master_license and not project.get("license"):
+    add(WARN, f"[project].license missing (master had: {master_license!r})")
+
+master_cls_raw = cfg_meta("classifiers")
+if master_cls_raw:
+    master_cls = [c.strip() for c in master_cls_raw.splitlines() if c.strip() and not c.startswith("#")]
+else:
+    master_cls = extract_setup_py_field(setup_py, "classifiers") or []
+pr_cls = project.get("classifiers", [])
+if master_cls and not pr_cls:
+    add(WARN, f"No classifiers in [project] (master had {len(master_cls)} classifiers)")
+elif pr_cls:
+    master_license_cls = [c for c in master_cls if "License ::" in c]
+    if master_license_cls and not any("License ::" in c for c in pr_cls):
+        add(INFO, f"License classifier dropped — master had: {master_license_cls[0]!r}")
+    for d in sorted({c for c in master_cls if "Python :: 3." not in c and "License ::" not in c} - set(pr_cls)):
+        add(INFO, f"Classifier dropped: {d!r}")
+
+master_eps = {}
+for section in ("options.entry_points", "entry_points"):
+    if cfg.has_section(section):
+        for k, v in cfg.items(section): master_eps[k] = v.strip()
+if setup_py and not master_eps:
+    m = re.search(r'entry_points\s*=\s*\{([^}]+)\}', setup_py, re.DOTALL)
+    if m:
+        for km in re.finditer(r'["\']([^"\']+)["\']\s*:\s*\[([^\]]+)\]', m.group(1), re.DOTALL):
+            master_eps[km.group(1)] = km.group(2)
+if "console_scripts" in master_eps and not project.get("scripts"):
+    add(FAIL, "[project.scripts] missing — master had console_scripts")
+for ep_key in master_eps:
+    if ep_key != "console_scripts" and ep_key not in str(project.get("entry-points", {})):
+        add(WARN, f"Entry point group {ep_key!r} from master not in [project.entry-points]")
+
+if project.get("dependencies") is None:
+    add(FAIL, "[project].dependencies missing")
+
+if cfg.has_section("isort") and "isort" not in tool:
+    add(WARN, "[isort] in master's setup.cfg not migrated to [tool.isort]")
+
+has_mypy = cfg.has_section("mypy") or any(s.startswith("mypy-") for s in cfg.sections())
+if has_mypy and "mypy" not in tool:
+    add(WARN, "[mypy] in master's setup.cfg not migrated to [tool.mypy]")
+
+has_pytest = cfg.has_section("tool:pytest") or cfg.has_section("pytest")
+if not has_pytest:
+    tox_ini = git_show("tox.ini")
+    if tox_ini:
+        tox_cfg = configparser.ConfigParser(); tox_cfg.read_string(tox_ini)
+        has_pytest = tox_cfg.has_section("pytest")
+if has_pytest and "pytest" not in tool:
+    add(WARN, "[tool:pytest] config on master not migrated to [tool.pytest.ini_options]")
+
+has_cov = bool(coveragerc) or cfg.has_section("coverage:run") or cfg.has_section("coverage:report")
+if has_cov and "coverage" not in tool:
+    add(WARN, "Coverage config on master not migrated to [tool.coverage]")
+
+master_ipd = cfg.get("options", "include_package_data", fallback=None)
+if not master_ipd and setup_py and re.search(r'include_package_data\s*=\s*True', setup_py):
+    master_ipd = "True"
+if master_ipd and master_ipd.lower() in ("true","1","yes") and not tool.get("setuptools",{}).get("include-package-data"):
+    add(INFO, "[tool.setuptools] include-package-data = true not set (master had include_package_data=True)")
+
+fails = [f for f in findings if f[0] == FAIL]
+warns = [f for f in findings if f[0] == WARN]
+infos = [f for f in findings if f[0] == INFO]
+for sev, msg in findings:
+    label = {"FAIL": "FAIL", "WARN": "WARN", "info": "info"}[sev]
+    print(f"  [{label}]  {msg}")
+print(f"setup.py/setup.cfg parity: {len(fails)} FAIL, {len(warns)} WARN, {len(infos)} info")
+if fails: raise SystemExit(1)
+PYEOF
+
+# --- Check 10: codecov.yml not introduced when master didn't have one ---
+echo "--- Check 10: codecov.yml ---"
+python3 << 'PYEOF'
+import subprocess, os
+
+# Does master have codecov.yml?
+base = next((b for b in ('main','master') if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],capture_output=True).returncode==0), None)
+if not base:
+    print("SKIP: no local main/master branch")
+    raise SystemExit(0)
+
+master_has = subprocess.run(['git','show',f'{base}:codecov.yml'],capture_output=True).returncode == 0
+pr_has = os.path.isfile('codecov.yml')
+
+if pr_has and not master_has:
+    print("FAIL: codecov.yml introduced but master had none — delete it (do not invent thresholds)")
+    raise SystemExit(1)
+
+if pr_has and master_has:
+    # Both have it — check for invented keys not present on master
+    master_content = subprocess.run(['git','show',f'{base}:codecov.yml'],capture_output=True,text=True).stdout
+    pr_content = open('codecov.yml').read()
+    invented = []
+    for key in ('target:', 'threshold:', 'fail_under:'):
+        if key in pr_content and key not in master_content:
+            invented.append(key)
+    if invented:
+        print(f"FAIL: codecov.yml has key(s) not in master: {invented} — copy master verbatim, do not add thresholds")
+        raise SystemExit(1)
+    print("OK: codecov.yml copied from master (no invented keys)")
+else:
+    print("OK: codecov.yml status matches master")
+PYEOF
+
+# --- Check 11: tox.ini env section order matches master ---
+echo "--- Check 11: tox.ini env order ---"
+python3 << 'PYEOF'
+import re, subprocess
+
+base = next((b for b in ('main','master') if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],capture_output=True).returncode==0), None)
+if not base:
+    print("SKIP: no local main/master branch")
+    raise SystemExit(0)
+
+def get_tox_sections(content):
+    sections = []
+    for line in content.splitlines():
+        m = re.match(r'^\[testenv(?::([^\]]+))?\]', line.strip())
+        if m:
+            sections.append(m.group(1) or '(default)')
+    return sections
+
+r = subprocess.run(['git','show',f'{base}:tox.ini'], capture_output=True, text=True)
+if r.returncode != 0:
+    print("SKIP: no tox.ini on master")
+    raise SystemExit(0)
+
+master_sections = get_tox_sections(r.stdout)
+try:
+    pr_sections = get_tox_sections(open('tox.ini').read())
+except FileNotFoundError:
+    print("FAIL: tox.ini not found")
+    raise SystemExit(1)
+
+pr_set = set(pr_sections)
+master_set = set(master_sections)
+master_common = [s for s in master_sections if s in pr_set]
+pr_common = [s for s in pr_sections if s in master_set]
+
+if master_common != pr_common:
+    print(f"FAIL: tox.ini section order differs from master")
+    print(f"  Master order (common sections): {master_common}")
+    print(f"  PR order (common sections):     {pr_common}")
+else:
+    print(f"OK: tox.ini env section order matches master ({pr_common})")
+PYEOF
+
+# --- Check 12: no new tox environments beyond py/docs/quality (lint) ---
+echo "--- Check 12: no new tox environments ---"
+python3 << 'PYEOF'
+import re, subprocess
+
+base = next((b for b in ('main','master') if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],capture_output=True).returncode==0), None)
+if not base:
+    print("SKIP: no local main/master branch")
+    raise SystemExit(0)
+
+def get_named_envs(content):
+    envs = set()
+    for line in content.splitlines():
+        m = re.match(r'^\[testenv:([^\]]+)\]', line.strip())
+        if m:
+            envs.add(m.group(1))
+    return envs
+
+r = subprocess.run(['git','show',f'{base}:tox.ini'], capture_output=True, text=True)
+master_envs = get_named_envs(r.stdout) if r.returncode == 0 else set()
+
+try:
+    pr_envs = get_named_envs(open('tox.ini').read())
+except FileNotFoundError:
+    print("FAIL: tox.ini not found")
+    raise SystemExit(1)
+
+ALLOWED_NEW = {'lint', 'quality', 'docs'}
+new_envs = pr_envs - master_envs
+disallowed_new = new_envs - ALLOWED_NEW
+
+if disallowed_new:
+    print(f"FAIL: new tox environments introduced beyond py/docs/quality: {sorted(disallowed_new)}")
+    print(f"  Only [testenv] (py), [testenv:docs], and [testenv:lint]/[testenv:quality] may be introduced")
+    raise SystemExit(1)
+elif new_envs:
+    print(f"OK: only permitted new environments introduced: {sorted(new_envs)}")
+else:
+    print(f"OK: no new tox environments introduced")
+PYEOF
+
+# --- Check 13: Makefile target order matches master ---
+echo "--- Check 13: Makefile target order ---"
+python3 << 'PYEOF'
+import re, subprocess
+
+base = next((b for b in ('main','master') if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],capture_output=True).returncode==0), None)
+if not base:
+    print("SKIP: no local main/master branch")
+    raise SystemExit(0)
+
+def get_targets(content):
+    targets = []
+    for line in content.splitlines():
+        if line.startswith('\t') or line.startswith(' '):
+            continue
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_.-]*):', line)
+        if m:
+            targets.append(m.group(1))
+    return targets
+
+r = subprocess.run(['git','show',f'{base}:Makefile'], capture_output=True, text=True)
+if r.returncode != 0:
+    print("SKIP: no Makefile on master")
+    raise SystemExit(0)
+master_targets = get_targets(r.stdout)
+
+try:
+    pr_targets = get_targets(open('Makefile').read())
+except FileNotFoundError:
+    print("FAIL: Makefile not found")
+    raise SystemExit(1)
+
+pr_set = set(pr_targets)
+master_set = set(master_targets)
+master_common = [t for t in master_targets if t in pr_set]
+pr_common = [t for t in pr_targets if t in master_set]
+
+if master_common != pr_common:
+    print(f"FAIL: Makefile target order differs from master")
+    print(f"  Master order (common targets): {master_common}")
+    print(f"  PR order (common targets):     {pr_common}")
+    raise SystemExit(1)
+else:
+    print(f"OK: Makefile target order matches master")
+PYEOF
+
+# --- Check 14: Makefile changes are in scope (no new/removed targets outside allowed) ---
+echo "--- Check 14: Makefile changes in scope ---"
+python3 << 'PYEOF'
+import re, subprocess
+
+base = next((b for b in ('main','master') if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],capture_output=True).returncode==0), None)
+if not base:
+    print("SKIP: no local main/master branch")
+    raise SystemExit(0)
+
+def get_targets(content):
+    targets = []
+    for line in content.splitlines():
+        if line.startswith('\t') or line.startswith(' '):
+            continue
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_.-]*):', line)
+        if m:
+            targets.append(m.group(1))
+    return targets
+
+r = subprocess.run(['git','show',f'{base}:Makefile'], capture_output=True, text=True)
+if r.returncode != 0:
+    print("SKIP: no Makefile on master")
+    raise SystemExit(0)
+master_targets = get_targets(r.stdout)
+master_set = set(master_targets)
+
+try:
+    pr_targets = get_targets(open('Makefile').read())
+except FileNotFoundError:
+    print("FAIL: Makefile not found")
+    raise SystemExit(1)
+pr_set = set(pr_targets)
+
+# Allowed removals: compile-requirements and any pip-compile-style targets
+pip_compile_re = re.compile(r'pip.?compile|compile.?req', re.IGNORECASE)
+allowed_removed = {'compile-requirements'} | {t for t in master_targets if pip_compile_re.search(t)}
+
+failures = []
+
+new_targets = pr_set - master_set
+if new_targets:
+    failures.append(f"New Makefile targets introduced (not in master): {sorted(new_targets)}")
+
+removed_targets = master_set - pr_set
+disallowed_removed = removed_targets - allowed_removed
+if disallowed_removed:
+    failures.append(f"Makefile targets removed outside PR scope: {sorted(disallowed_removed)}")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    raise SystemExit(1)
+else:
+    if removed_targets:
+        print(f"OK: only in-scope targets removed ({sorted(removed_targets)}); no new targets added")
+    else:
+        print(f"OK: no Makefile targets added or removed outside scope")
+PYEOF
+
+# --- Check 15: no source-tracing comments in [dependency-groups] ---
+echo "--- Check 15: no source-tracing comments in [dependency-groups] ---"
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('pyproject.toml').read()
+except FileNotFoundError:
+    print("SKIP: no pyproject.toml found")
+    raise SystemExit(0)
+
+dep_groups_match = re.search(r'^\[dependency-groups\]', content, re.MULTILINE)
+if not dep_groups_match:
+    print("SKIP: no [dependency-groups] section found")
+    raise SystemExit(0)
+
+next_section = re.search(r'^\[', content[dep_groups_match.end():], re.MULTILINE)
+dep_groups_content = content[dep_groups_match.start(): dep_groups_match.end() + (next_section.start() if next_section else len(content))]
+
+BAD_PATTERNS = [
+    (r'#.*\bFrom requirements/', 'source-tracing comment referencing old requirements file'),
+    (r'#.*requirements/.*\.in', 'source-tracing comment referencing old .in file'),
+    (r'#.*Each group mirrors', 'boilerplate migration comment'),
+    (r'#.*-r \S+\.in.*include-group', 'migration mechanics comment explaining .in syntax'),
+    (r'#.*Direct packages.*listed verbatim', 'obvious statement comment'),
+]
+
+failures = []
+for line in dep_groups_content.splitlines():
+    stripped = line.strip()
+    if not stripped.startswith('#'):
+        continue
+    for pattern, description in BAD_PATTERNS:
+        if re.search(pattern, stripped, re.IGNORECASE):
+            failures.append(f"  {description}: {stripped!r}")
+            break
+
+if failures:
+    print("FAIL: source-tracing/unimportant comments found in [dependency-groups]:")
+    for f in failures: print(f)
+    print("  Remove these — group names and include-group entries already document the structure.")
+    raise SystemExit(1)
+else:
+    print("OK: no source-tracing comments in [dependency-groups]")
+PYEOF
+
+# --- Check 17: pragma: no cover on PackageNotFoundError except branch ---
+echo "--- Check 17: pragma: no cover on PackageNotFoundError ---"
+python3 << 'PYEOF'
+import re, glob
+
+failures = []
+for py_file in glob.glob('src/**/*.py', recursive=True) + glob.glob('*.py') + glob.glob('[!.]*/**/__init__.py', recursive=True):
+    try:
+        lines = open(py_file).readlines()
+    except Exception:
+        continue
+    for i, line in enumerate(lines):
+        if 'except PackageNotFoundError' in line and '# pragma: no cover' not in line:
+            failures.append(f"{py_file}:{i+1}: missing '# pragma: no cover' on except PackageNotFoundError branch")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+else:
+    print("OK: all PackageNotFoundError except branches have pragma: no cover")
+PYEOF
+
+# --- Check 18: no uv tool install tox in Makefile requirements target ---
+echo "--- Check 18: no uv tool install tox in Makefile ---"
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('Makefile').read()
+except FileNotFoundError:
+    print("SKIP: no Makefile found")
+    raise SystemExit(0)
+
+if re.search(r'uv\s+tool\s+install\s+tox', content):
+    print("FAIL: 'uv tool install tox' found in Makefile — this installs an unpinned global tox outside uv.lock. "
+          "Remove it; CI uses 'uv sync --group ci' + 'uv run tox' (the locked tox from the ci dependency group).")
+else:
+    print("OK: no 'uv tool install tox' in Makefile")
+PYEOF
+
+# --- Check 21: no uv pip install in CI workflows ---
+echo "--- Check 21: no uv pip install in CI workflows ---"
+if grep -rqE 'uv pip install' .github/workflows/ 2>/dev/null; then
+  echo "FAIL: 'uv pip install' found in CI workflow(s) — this is an anti-pattern:"
+  grep -rnE 'uv pip install' .github/workflows/
+  echo "  Use 'uv sync --group <name>' or 'uv run tox -e <env>' instead — both pull from uv.lock."
+else
+  echo "OK: no uv pip install in CI workflows"
+fi
+
+# --- Check 20: no stray pip install -r requirements/ in Makefile ---
+echo "--- Check 20: no stray pip install -r requirements/ in Makefile ---"
+if grep -qE 'pip install.*requirements/' Makefile 2>/dev/null; then
+  echo "FAIL: Makefile still references requirements/ files via pip install:"
+  grep -nE 'pip install.*requirements/' Makefile
+  echo "  requirements/ is deleted — migrate each target to 'uv sync [--group <name>]' using the correct scope"
+else
+  echo "OK: no pip install -r requirements/ references in Makefile"
+fi
+
+# --- Check 19: no manually-crafted comment header above constraint-dependencies ---
+echo "--- Check 19: constraint-dependencies comment header ---"
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('pyproject.toml').read()
+except FileNotFoundError:
+    print("SKIP: no pyproject.toml found")
+    raise SystemExit(0)
+
+# Find the constraint-dependencies key and look for comment lines immediately above it
+lines = content.splitlines()
+for i, line in enumerate(lines):
+    if re.match(r'\s*constraint-dependencies\s*=', line):
+        # Scan backwards for comment lines directly above it
+        j = i - 1
+        offending = []
+        while j >= 0 and (lines[j].strip().startswith('#') or lines[j].strip() == ''):
+            if lines[j].strip().startswith('#'):
+                offending.append(lines[j].strip())
+            j -= 1
+        BAD_PATTERNS = [
+            r'machine.managed', r'do not edit', r'To regenerate', r'edx.lint', r'write_uv_constraints',
+        ]
+        bad = [c for c in offending if any(re.search(p, c, re.IGNORECASE) for p in BAD_PATTERNS)]
+        if bad:
+            print("FAIL: manually crafted comment header found above constraint-dependencies:")
+            for b in bad: print(f"  {b}")
+            print("  The tool writes constraint-dependencies without a comment header.")
+            print("  Remove these comments — their presence signals edx_lint write_uv_constraints was not actually run.")
+            raise SystemExit(1)
+        break
+
+print("OK: no manually crafted comment header above constraint-dependencies")
+PYEOF
+
+# --- Check 16: required tox environments present (py, quality, docs) ---
+echo "--- Check 16: required tox environments ---"
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('tox.ini').read()
+except FileNotFoundError:
+    print("FAIL: tox.ini not found")
+    raise SystemExit(1)
+
+# [testenv] (no suffix) is the py/default test env
+has_py = bool(re.search(r'^\[testenv\]', content, re.MULTILINE))
+# quality or lint are both acceptable
+has_quality = bool(re.search(r'^\[testenv:(quality|lint)\]', content, re.MULTILINE))
+# docs env
+has_docs = bool(re.search(r'^\[testenv:docs\]', content, re.MULTILINE))
+
+failures = []
+if not has_py:
+    failures.append("Missing [testenv] (py env) — all repos must have a default test environment")
+if not has_quality:
+    failures.append("Missing [testenv:quality] (or [testenv:lint]) — all repos must have a quality/lint environment")
+if not has_docs:
+    failures.append(
+        "Missing [testenv:docs] — add it, or if the repo has no docs infrastructure at all "
+        "(no docs/ dir, no make docs target, no Sphinx config), document the omission "
+        "in ## Important Notes of the PR before proceeding"
+    )
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    raise SystemExit(1)
+else:
+    print(f"OK: required tox environments present (py={has_py}, quality/lint={has_quality}, docs={has_docs})")
+PYEOF
+
+# --- Check 19: no manual GITHUB_PATH venv manipulation in CI workflows ---
+echo "--- Check 19: no manual venv GITHUB_PATH echo ---"
+python3 << 'PYEOF'
+import re, glob
+
+failures = []
+for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+    try:
+        content = open(wf_path).read()
+    except FileNotFoundError:
+        continue
+    for i, line in enumerate(content.splitlines(), 1):
+        if re.search(r'echo\s+.*\.venv[/\\]bin.*GITHUB_PATH', line):
+            failures.append(f"{wf_path}:{i}: manual venv PATH echo — use 'uv run <tool>' instead: {line.strip()!r}")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    print("  Remove these echoes. When using astral-sh/setup-uv, prefix tool invocations with "
+          "'uv run' — uv manages venv activation automatically. Manually adding .venv/bin to "
+          "GITHUB_PATH is a workaround that indicates tools are still called as bare commands.")
+else:
+    print("OK: no manual .venv/bin GITHUB_PATH echoes in CI workflows")
+PYEOF
+
 echo "======= END PRE-PR VALIDATION ======="
 ```
 
@@ -1239,6 +1839,7 @@ echo "======= END PRE-PR VALIDATION ======="
 
 ### Checklist before opening the PR
 
+- [ ] `tox.ini` has `py` (default `[testenv]`), `quality` (or `lint`), and `docs` environments — if `docs` is absent, the reason is documented in `## Important Notes` of the PR
 - [ ] All metadata migrated from setup.cfg/setup.py to pyproject.toml
 - [ ] `dependencies` is a static list in `[project]`
 - [ ] MANIFEST.in asset patterns migrated to `[tool.setuptools.package-data]`
@@ -1248,11 +1849,11 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `requirements/` deleted
 - [ ] `tox.ini` uses `tox-uv>=1`, `uv-venv-lock-runner`, tox envs call `make` targets
 - [ ] Makefile `upgrade` → `edx_lint write_uv_constraints` + `uv lock --upgrade`
-- [ ] Makefile `requirements` → `uv sync --group dev` + `uv tool install tox --with tox-uv`
+- [ ] Makefile `requirements` → `uv sync --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
 - [ ] CI uses `astral-sh/setup-uv`, `uv sync --group ci`, `uv run tox`, named `ci.yml`
 - [ ] CI uses `fail-fast: true`
-- [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env
+- [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env; Codecov `if:` uses compound condition (`matrix.toxenv == 'py' && matrix.python-version == '3.12'`)
 - [ ] Codecov `if:` condition references the exact toxenv name used in the matrix
 - [ ] All actions SHA-pinned; no SHA is older than what master used
 - [ ] **pylint/isort/pycodestyle retained in quality group — no ruff introduced**
@@ -1260,10 +1861,11 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `make lint` exits 0
 - [ ] `make test` exits 0
 - [ ] `uv lock --check` exits 0
-- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines**
+- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope)
 - [ ] Coverage thresholds match master (no invented `fail_under`)
-- [ ] `__version__` removed from package source (or replaced with importlib.metadata)
-- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `CHANGELOG.rst` deleted; `[tool.semantic_release]` in pyproject.toml; zero-version guard only if 0.x; `## Important Notes` flags OIDC trusted publisher config required
+- [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
+- [ ] `__version__` in package `__init__.py` uses `importlib.metadata` pattern with `# pragma: no cover` on the `except PackageNotFoundError` line — never remove `__version__` entirely
+- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `CHANGELOG.rst` created/updated with insertion marker and auto-managed note; `[tool.semantic_release.changelog]` + `[tool.semantic_release]` in pyproject.toml; zero-version guard only if 0.x; `## Important Notes` flags OIDC trusted publisher config required
 - [ ] **Non-PyPI repos:** static `version = "x.y.z"` in `[project]`; no `setuptools-scm`; `## Important Notes` documents why `src/` layout and `release.yml` were not added
 - [ ] `src/` layout decision documented in `## Important Notes` if not adopted
 
@@ -1342,6 +1944,12 @@ comm -12 \
   <(git show master:Makefile 2>/dev/null | grep -E '^[a-zA-Z_-]+:' | sed 's/:.*//' | sort) \
   <(grep -E '^[a-zA-Z_-]+:' Makefile 2>/dev/null | sed 's/:.*//' | sort)
 
+# uv tool install tox — must be absent from requirements target
+echo "=== uv tool install tox (must be absent) ==="
+grep -n 'uv tool install tox' Makefile 2>/dev/null \
+  && echo "WARNING: 'uv tool install tox' found — remove it; tox belongs in the ci dependency group, not as a global tool install" \
+  || echo "OK: absent"
+
 # Any non-obvious changes (constraints, codecov, branch protection, etc.)
 git diff master...HEAD -- .github/workflows/
 ```
@@ -1357,9 +1965,9 @@ Use the template in [PR description format](#pr-description-format). Apply these
 - **`[- Add python-semantic-release + release.yml (OIDC publishing)]` bullet:** include only if `release.yml: PRESENT`.
 - **`[- Add commitlint.yml ...]` bullet:** include only if added in the PR. Always add an `## Important Notes` bullet warning that conventional commit format is now enforced on all future PRs to this repo.
 - **`[- Drop Python X.Y support]` bullet:** include only if `requires-python` changed vs master.
-- **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Include `.coveragerc` only if it existed on master. Include `CHANGELOG.rst` only if `release.yml: PRESENT`. Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
+- **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Include `.coveragerc` only if it existed on master. Never list `CHANGELOG.rst` as deleted — for PyPI repos it is created/updated with the PSR insertion marker (not removed). Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
 - **Removed Makefile targets table:** populate from the `=== Targets removed ===` list only. Any target in `=== Targets kept ===` must not appear here, even if its implementation was rewritten. Include a specific reason per row.
-- **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed.
+- **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed. For the `requirements` target, the entry must describe `uv sync --group dev` — if the `=== uv tool install tox ===` check in Step 1 flagged a hit, do NOT document it as correct in the table; flag it as a bug to fix before the PR is merged.
 - **`## Python X.Y dropped` section:** present if and only if `requires-python` changed vs master. Omit otherwise.
 - **Versioning section:** write the `[Static]` paragraph if no `setuptools-scm` in `pyproject.toml`; write the `[Dynamic]` paragraph if `setuptools-scm` is present. Write exactly one, never both.
 - **`## Important Notes` section:** include when there is something critical to flag. Always include when `release.yml: PRESENT` (flag that OIDC trusted publisher must be configured on PyPI before merge). Also use for: omitted items (`release.yml` not added because no PyPI workflow existed; `src/` layout not adopted because repo doesn't publish to PyPI), unusual constraint pins, branch-protection check names reviewers must verify, or any other non-obvious decision.
@@ -1392,7 +2000,7 @@ Part of https://github.com/openedx/public-engineering/issues/506
 
 ## Removed/Updated
 
-**Deleted files:** `setup.py`, `setup.cfg`, `requirements/`[, `.coveragerc` ← only if existed on master][, `CHANGELOG.rst` ← only if release gate passed]
+**Deleted files:** `setup.py`, `setup.cfg`, `requirements/`[, `.coveragerc` ← only if existed on master]
 
 **Removed Makefile targets:**
 
@@ -1453,7 +2061,7 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-10360), in order, Test 10 through Test 360.
+Run **all** tests from the [Test suite](#test-suite--tests-10390), in order, Test 10 through Test 390.
 
 **Test 10 is a hard gate.** If ruff is present, Test 10 fails: **stop running the remaining tests**, report only Test 10's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 10 halts — record them as `⏭️ Skipped (halted at Test 10 — ruff present)`.
 
@@ -1484,8 +2092,10 @@ Template:
 | Test#40 | Lockfile consistency | ❌ Fail | uv lock --check exits 1 |
 | ... | ... | ... | ... |
 | Test#110 | SHA pinning audit | ⏭️ Skipped (gated — run explicitly to check SHA pinning) | |
+| Test#155 | setup.py/setup.cfg migration parity | ✅ Pass | all metadata, entry points, and tool configs migrated |
 | Test#210 | PR description completeness | ⏭️ Skipped (gated — run explicitly to check PR description) | |
 | Test#220 | src/ layout | ✅ Pass | (PyPI repo) package under src/<pkg> — OR — (non-PyPI repo) flat layout retained, documented in PR |
+| Test#230 | Mypy not introduced (or retained if present) | ✅ Pass | — OR — ⏭️ Skipped (master did not use mypy — confirmed mypy not introduced) |
 | Test#290 | No action version downgrades | ✅ Pass | all PR-modified workflows use versions ≥ main |
 | Test#300 | CI toxenv uses `py` not `py312` | ✅ Pass | no bare version-specific toxenv entries |
 | Test#310 | No empty codecov.yml introduced | ✅ Pass | |
@@ -1494,6 +2104,9 @@ Template:
 | Test#340 | Dependency groups use include-group | ✅ Pass | all -r references use include-group |
 | Test#350 | Makefile targets run tools directly | ✅ Pass | |
 | Test#360 | isort style unchanged | ✅ Pass | — OR — ⏭️ Skipped (no isort config on master) |
+| Test#370 | No source-tracing comments in dependency-groups | ✅ Pass | |
+| Test#380 | Required tox environments present | ✅ Pass | py, quality, docs all present |
+| Test#390 | No manual venv GITHUB_PATH echo in CI | ✅ Pass | |
 
 ## Failure details
 
@@ -1505,7 +2118,7 @@ If Test 10 halts, the table lists Test#10 as `🛑 Halt` and every other row as 
 
 ---
 
-## Test suite — Tests 10–360
+## Test suite — Tests 10–390
 
 All tests must be run as part of a verification report (Test/Verify mode). **Test 10 is a hard gate — if it fails, halt.**
 
@@ -1518,11 +2131,12 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Package structure and files | 90, 130, 220, 310 | Stale files deleted; `__version__` removed; src/ layout correct; no empty codecov.yml introduced |
 | Package build | 30, 70, 80 | Build output complete; package imports; setuptools-scm runtime (PyPI) |
 | Dependency management | 40, 50, 160, 170, 270, 340 | Lockfile in sync; groups resolve; all packages migrated; constraints; static deps; `-r` refs use include-group |
+| Migration parity | 155 | Every field from master's setup.py/setup.cfg (metadata, entry points, tool configs) present in pyproject.toml |
 | Versioning | 240 | Versioning strategy: setuptools-scm (PyPI) or static version (no-PyPI), including 0.x guard |
-| Quality tooling | 230, 280, 360 | Mypy retained (if used); quality group has original linters; isort style unchanged |
-| Tox configuration | 60, 320, 330 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets |
+| Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
+| Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
 | Makefile | 20, 140, 350 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox) |
-| GitHub Actions and CI | 100, 150, 180, 250, 290, 300 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312` |
+| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 390 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; no manual venv PATH echo |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
@@ -1705,22 +2319,46 @@ uv run python -m setuptools_scm
 
 This should print a version string.
 
-### Test 130 — No `__version__` in package source
+### Test 130 — `__version__` uses `importlib.metadata` pattern
 
 ```bash
-grep -rn '__version__' --include='*.py' .
+grep -rn '__version__' --include='*.py' . | grep -v '\.tox' | grep -v '/test'
 ```
 
-Any match in the package source (not in tests or build tooling) is a failure. Remove it, or replace with the `importlib.metadata` pattern if genuinely needed at runtime.
+**Pass criteria — both must hold:**
+1. No hardcoded `__version__ = "x.y.z"` string remains in package source.
+2. The `importlib.metadata` pattern is present in the package `__init__.py`, with `# pragma: no cover` on the `except PackageNotFoundError` line:
+
+```python
+from importlib.metadata import PackageNotFoundError, version
+try:
+    __version__ = version("<package-name>")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "unknown"
+```
+
+`__version__` should always be kept as a norm — do not remove it entirely. The `# pragma: no cover` is required because the except branch is unreachable during tests (the package is always installed) and will cause codecov failures without it.
 
 
 ### Test 90 — No stale files on disk
 
 ```bash
-for f in setup.py setup.cfg CHANGELOG.rst .coveragerc; do
+for f in setup.py setup.cfg .coveragerc; do
   [ -f "$f" ] && echo "STALE: $f still exists" || echo "OK: $f absent"
 done
 [ -d requirements ] && echo "STALE: requirements/ still exists" || echo "OK: requirements/ absent"
+
+# CHANGELOG.rst — PyPI repos must HAVE it (with insertion marker); non-PyPI repos keep it as-is
+if [ -f .github/workflows/release.yml ]; then
+  # PyPI repo
+  if [ ! -f CHANGELOG.rst ]; then
+    echo "MISSING: CHANGELOG.rst — PyPI repos must have CHANGELOG.rst with .. changelog-insertion-marker"
+  elif grep -q "changelog-insertion-marker" CHANGELOG.rst; then
+    echo "OK: CHANGELOG.rst present with insertion marker"
+  else
+    echo "FAIL: CHANGELOG.rst exists but missing '.. changelog-insertion-marker'"
+  fi
+fi
 
 # pylintrc / pylintrc_tweaks must be KEPT this cycle (ruff out of scope)
 for f in pylintrc pylintrc_tweaks; do
@@ -1730,7 +2368,7 @@ for f in pylintrc pylintrc_tweaks; do
 done
 ```
 
-Any `STALE:` line or `REGRESSION:` line is a failure. Note: `CHANGELOG.rst` counts as `STALE` only on PyPI repos (release gate passed); for no-PyPI repos it must be kept.
+Any `STALE:`, `MISSING:`, `FAIL:`, or `REGRESSION:` line is a failure.
 
 ### Test 100 — GitHub Actions workflow YAML validity
 
@@ -1752,17 +2390,22 @@ Scan only workflow files that were **added or modified by this PR** for GitHub A
 git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml'
 ```
 
-For each changed workflow file, check for un-pinned references — **excluding org-internal reusable workflow calls**:
+For each changed workflow file, check for un-pinned references — **excluding org-internal reusable workflow calls and PSR actions** (which intentionally use floating version tags):
 
 ```bash
 git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml' \
   | xargs grep -E 'uses:\s+\S+@' \
   | grep -v '@[0-9a-f]\{40\}' \
   | grep -v '^#' \
-  | grep -v 'uses:\s\+openedx/\.github/'
+  | grep -v 'uses:\s\+openedx/\.github/' \
+  | grep -v 'python-semantic-release/'
 ```
 
-**Pass:** No un-pinned third-party action references in any workflow file added or modified by the PR.
+**Exemptions from SHA pinning:**
+- `python-semantic-release/python-semantic-release` and `python-semantic-release/publish-action` — these run only on push to the default branch (never in PR CI), so floating version tags (e.g. `@v10.6.1`) are correct and intentional. The `openedx/XBlock` reference implementation uses this pattern.
+- `pypa/gh-action-pypi-publish` — **must be SHA-pinned** with a verified commit SHA (not a tag-object SHA). A floating ref on this action caused a real production incident; verify the SHA resolves via `gh api repos/pypa/gh-action-pypi-publish/commits/<sha>` before accepting.
+
+**Pass:** No un-pinned third-party action references in any workflow file added or modified by the PR (PSR actions with floating version tags are exempt; `gh-action-pypi-publish` must be SHA-pinned).
 
 ### Test 120 — Logic change audit (informational only)
 
@@ -1793,6 +2436,238 @@ grep -A5 'toxenv:' .github/workflows/ci.yml  # or python-tests.yml
 
 Every tool that ran in the old CI must run in the new CI toxenv matrix.
 
+
+### Test 155 — setup.py / setup.cfg migration parity
+
+Verify that every configuration field from master's `setup.py` and `setup.cfg` is present in the modernized `pyproject.toml`. This catches fields silently dropped during migration.
+
+Checks (ordered by severity):
+
+- **FAIL:** name mismatch, description missing, `requires-python` missing, entry points dropped, `[project].dependencies` absent
+- **WARN:** license missing, classifiers absent, isort config not migrated, mypy config not migrated, coverage config not migrated, pytest config not migrated
+- **info:** License classifier dropped, individual classifiers dropped, `include_package_data` not set, minor field differences
+
+```bash
+python3 << 'PYEOF'
+import re, subprocess, tomllib, configparser
+
+FAIL = "FAIL"; WARN = "WARN"; INFO = "info"
+findings = []
+
+def add(sev, msg): findings.append((sev, msg))
+
+# Detect base branch
+BASE = None
+for b in ("main", "master"):
+    r = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{b}"], capture_output=True)
+    if r.returncode == 0:
+        BASE = b; break
+if not BASE:
+    for remote in ("upstream", "origin"):
+        for b in ("main", "master"):
+            r = subprocess.run(["git", "ls-remote", "--exit-code", "--heads", remote, b], capture_output=True)
+            if r.returncode == 0:
+                BASE = f"{remote}/{b}"; break
+        if BASE: break
+if not BASE:
+    print("SKIP: no main/master branch found — cannot compare against master")
+    raise SystemExit(0)
+
+print(f"Comparing against: {BASE}\n")
+
+def git_show(path):
+    r = subprocess.run(["git", "show", f"{BASE}:{path}"], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+def extract_setup_py_field(content, field):
+    if not content: return None
+    m = re.search(rf'{field}\s*=\s*\[([^\]]+)\]', content, re.DOTALL)
+    if m:
+        return re.findall(r'["\']([^"\']+)["\']', m.group(1)) or None
+    m = re.search(rf'{field}\s*=\s*["\']([^"\']+)["\']', content)
+    return m.group(1) if m else None
+
+try:
+    with open("pyproject.toml", "rb") as f:
+        toml = tomllib.load(f)
+except Exception as e:
+    print(f"FAIL: cannot read pyproject.toml — {e}"); raise SystemExit(1)
+
+project = toml.get("project", {}); tool = toml.get("tool", {})
+setup_cfg = git_show("setup.cfg"); setup_py = git_show("setup.py")
+coveragerc = git_show(".coveragerc")
+
+cfg = configparser.ConfigParser()
+if setup_cfg: cfg.read_string(setup_cfg)
+
+def cfg_meta(key):
+    for section in ("metadata", "options"):
+        if cfg.has_section(section) and cfg.has_option(section, key):
+            return cfg.get(section, key).strip()
+    return extract_setup_py_field(setup_py, key)
+
+# ── 1. name ──────────────────────────────────────────────────────────────────
+master_name = cfg_meta("name")
+pr_name = project.get("name", "")
+if master_name and pr_name:
+    if master_name.replace("_","-").lower() != pr_name.replace("_","-").lower():
+        add(FAIL, f"[project].name mismatch: master={master_name!r} PR={pr_name!r}")
+    else:
+        print(f"  ok  name = {pr_name!r}")
+elif not pr_name:
+    add(FAIL, "[project].name missing")
+
+# ── 2. description ───────────────────────────────────────────────────────────
+master_desc = cfg_meta("description")
+if master_desc and not project.get("description"):
+    add(FAIL, f"[project].description missing (master had: {master_desc!r})")
+elif project.get("description"):
+    print(f"  ok  description present")
+
+# ── 3. requires-python ───────────────────────────────────────────────────────
+master_py = cfg_meta("python_requires")
+if master_py and not project.get("requires-python"):
+    add(FAIL, f"[project].requires-python missing (master had: {master_py!r})")
+elif project.get("requires-python"):
+    print(f"  ok  requires-python = {project['requires-python']!r}")
+
+# ── 4. license ───────────────────────────────────────────────────────────────
+master_license = cfg_meta("license")
+if master_license and not project.get("license"):
+    add(WARN, f"[project].license missing (master had: {master_license!r})")
+elif project.get("license"):
+    print(f"  ok  license = {project['license']!r}")
+
+# ── 5. classifiers ───────────────────────────────────────────────────────────
+master_cls_raw = cfg_meta("classifiers")
+if master_cls_raw:
+    master_cls = [c.strip() for c in master_cls_raw.splitlines() if c.strip() and not c.startswith("#")]
+else:
+    master_cls = extract_setup_py_field(setup_py, "classifiers") or []
+pr_cls = project.get("classifiers", [])
+if master_cls and not pr_cls:
+    add(WARN, f"No classifiers in [project] (master had {len(master_cls)} classifiers)")
+elif pr_cls:
+    master_license_cls = [c for c in master_cls if "License ::" in c]
+    pr_license_cls = [c for c in pr_cls if "License ::" in c]
+    if master_license_cls and not pr_license_cls:
+        add(INFO, f"License classifier dropped — master had: {master_license_cls[0]!r}")
+    elif pr_license_cls:
+        print(f"  ok  License classifier: {pr_license_cls[0]!r}")
+    important_dropped = {c for c in master_cls if "Python :: 3." not in c and "License ::" not in c} - set(pr_cls)
+    for d in sorted(important_dropped):
+        add(INFO, f"Classifier dropped: {d!r}")
+
+# ── 6. entry points ──────────────────────────────────────────────────────────
+master_eps = {}
+for section in ("options.entry_points", "entry_points"):
+    if cfg.has_section(section):
+        for k, v in cfg.items(section): master_eps[k] = v.strip()
+if setup_py and not master_eps:
+    m = re.search(r'entry_points\s*=\s*\{([^}]+)\}', setup_py, re.DOTALL)
+    if m:
+        for km in re.finditer(r'["\']([^"\']+)["\']\s*:\s*\[([^\]]+)\]', m.group(1), re.DOTALL):
+            master_eps[km.group(1)] = km.group(2)
+pr_scripts = project.get("scripts", {})
+pr_eps = project.get("entry-points", {})
+if "console_scripts" in master_eps:
+    if not pr_scripts:
+        add(FAIL, f"[project.scripts] missing — master had console_scripts")
+    else:
+        print(f"  ok  [project.scripts] = {list(pr_scripts.keys())}")
+for ep_key in master_eps:
+    if ep_key == "console_scripts": continue
+    if ep_key not in str(pr_eps):
+        add(WARN, f"Entry point group {ep_key!r} from master not in [project.entry-points]")
+
+# ── 7. dependencies ──────────────────────────────────────────────────────────
+if project.get("dependencies") is None:
+    add(FAIL, "[project].dependencies missing")
+else:
+    print(f"  ok  [project].dependencies ({len(project['dependencies'])} packages)")
+
+# ── 8. [isort] → [tool.isort] ────────────────────────────────────────────────
+if cfg.has_section("isort"):
+    if "isort" not in tool:
+        add(WARN, "[isort] in master's setup.cfg not migrated to [tool.isort]")
+    else:
+        print("  ok  [tool.isort] present")
+        for key in ("multi_line_output", "line_length", "include_trailing_comma"):
+            mv = cfg.get("isort", key, fallback=None)
+            pv = str(tool.get("isort", {}).get(key, ""))
+            if mv is not None and pv.lower().strip() != mv.lower().strip():
+                add(WARN, f"[tool.isort].{key}: master={mv!r} PR={pv!r}")
+
+# ── 9. [mypy] → [tool.mypy] ──────────────────────────────────────────────────
+has_mypy = cfg.has_section("mypy") or any(s.startswith("mypy-") for s in cfg.sections())
+if has_mypy:
+    if "mypy" not in tool:
+        add(WARN, "[mypy] in master's setup.cfg not migrated to [tool.mypy]")
+    else:
+        print("  ok  [tool.mypy] present")
+        for key in ("python_version", "ignore_missing_imports", "check_untyped_defs"):
+            mv = cfg.get("mypy", key, fallback=None)
+            pv = str(tool.get("mypy", {}).get(key, ""))
+            if mv is not None and pv.lower().strip() != mv.lower().strip():
+                add(INFO, f"[tool.mypy].{key}: master={mv!r} PR={pv!r}")
+
+# ── 10. pytest → [tool.pytest.ini_options] ───────────────────────────────────
+has_pytest = cfg.has_section("tool:pytest") or cfg.has_section("pytest")
+if not has_pytest:
+    tox_ini = git_show("tox.ini")
+    if tox_ini:
+        tox_cfg = configparser.ConfigParser()
+        tox_cfg.read_string(tox_ini)
+        has_pytest = tox_cfg.has_section("pytest")
+if has_pytest:
+    if "pytest" not in tool:
+        add(WARN, "[tool:pytest] config on master not migrated to [tool.pytest.ini_options]")
+    else:
+        print("  ok  [tool.pytest.ini_options] present")
+
+# ── 11. .coveragerc / [coverage:*] → [tool.coverage] ────────────────────────
+has_coverage = bool(coveragerc) or cfg.has_section("coverage:run") or cfg.has_section("coverage:report")
+if has_coverage:
+    if "coverage" not in tool:
+        add(WARN, "Coverage config on master (.coveragerc / setup.cfg [coverage:*]) not migrated to [tool.coverage]")
+    else:
+        print("  ok  [tool.coverage] present")
+        if coveragerc:
+            cov_cfg = configparser.ConfigParser()
+            cov_cfg.read_string(coveragerc)
+            for key in ("branch", "source", "omit"):
+                mv = cov_cfg.get("run", key, fallback=None)
+                pv = tool.get("coverage", {}).get("run", {}).get(key)
+                if mv and pv is None:
+                    add(INFO, f"[tool.coverage.run].{key} not set (master .coveragerc had {key} = {mv!r})")
+
+# ── 12. include_package_data ─────────────────────────────────────────────────
+master_ipd = cfg.get("options", "include_package_data", fallback=None)
+if not master_ipd and setup_py:
+    if re.search(r'include_package_data\s*=\s*True', setup_py):
+        master_ipd = "True"
+if master_ipd and master_ipd.lower() in ("true", "1", "yes"):
+    if not tool.get("setuptools", {}).get("include-package-data"):
+        add(INFO, "[tool.setuptools] include-package-data = true not set (master had include_package_data=True)")
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+print()
+fails = [f for f in findings if f[0] == FAIL]
+warns = [f for f in findings if f[0] == WARN]
+infos = [f for f in findings if f[0] == INFO]
+for sev, msg in findings:
+    print(f"  [{sev}]  {msg}")
+print(f"\n  setup.py/setup.cfg parity: {len(fails)} FAIL, {len(warns)} WARN, {len(infos)} info")
+if fails:
+    raise SystemExit(1)
+PYEOF
+```
+
+**Pass:** No `[FAIL]` lines. All metadata, entry points, and tool config sections from master are present in `pyproject.toml`.
+
+**Fail:** Any field that existed on master is absent or mismatched in the PR — a hard migration gap.
+
+---
 
 ### Test 160 — Dependency package parity
 
@@ -1953,7 +2828,35 @@ else:
 "
 ```
 
-**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty; all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins.
+**Step 4 — Verify no manually crafted comment header above `constraint-dependencies`:**
+
+```bash
+python3 << 'PYEOF'
+import re
+
+content = open('pyproject.toml').read()
+lines = content.splitlines()
+for i, line in enumerate(lines):
+    if re.match(r'\s*constraint-dependencies\s*=', line):
+        j = i - 1
+        offending = []
+        while j >= 0 and (lines[j].strip().startswith('#') or lines[j].strip() == ''):
+            if lines[j].strip().startswith('#'):
+                offending.append(lines[j].strip())
+            j -= 1
+        BAD = [r'machine.managed', r'do not edit', r'To regenerate', r'edx.lint', r'write_uv_constraints']
+        bad = [c for c in offending if any(re.search(p, c, re.IGNORECASE) for p in BAD)]
+        if bad:
+            print("FAIL: manually crafted comment header above constraint-dependencies:")
+            for b in bad: print(f"  {b}")
+            print("  The tool writes this key without a comment header — remove these comments.")
+        else:
+            print("OK: no manually crafted comment header above constraint-dependencies")
+        break
+PYEOF
+```
+
+**Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty; all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins; no manually crafted comment header above `constraint-dependencies`.
 
 ### Test 180 — release.yml structure: CI first, then OIDC publish only
 
@@ -2012,6 +2915,81 @@ if [ -d "$PKG" ] && [ "$PKG" != "src" ]; then echo "FAIL: top-level $PKG/ still 
 **Pass conditions:**
 - **PyPI repo:** `src/<pkg>/` exists; no stray top-level `<pkg>/`; `where = ["src"]`; the package imports cleanly.
 - **Non-PyPI repo without src/ layout:** Package remains at top level; `where` is not set; PR description documents why `src/` layout was not adopted.
+
+
+### Test 230 — Mypy not introduced (or retained if already present)
+
+First determine whether master used mypy — check the Makefile, tox.ini, and setup.cfg on the master branch:
+
+```bash
+echo "=== mypy in master Makefile ==="
+git show origin/master:Makefile 2>/dev/null | grep -i mypy || echo "(none)"
+echo "=== mypy in master tox.ini ==="
+git show origin/master:tox.ini 2>/dev/null | grep -i mypy || echo "(none)"
+echo "=== mypy in master setup.cfg ==="
+git show origin/master:setup.cfg 2>/dev/null | grep -i mypy || echo "(none)"
+```
+
+**If master did NOT use mypy** (none of those commands output anything): ⏭️ Skip this test with reason `master did not use mypy`. Then verify mypy was not introduced:
+
+```bash
+echo "=== mypy in PR pyproject.toml ==="
+grep -n 'mypy' pyproject.toml || echo "(none)"
+echo "=== mypy in PR tox.ini ==="
+grep -n 'mypy' tox.ini 2>/dev/null || echo "(none)"
+echo "=== mypy in PR Makefile ==="
+grep -n 'mypy' Makefile 2>/dev/null || echo "(none)"
+echo "=== mypy in PR uv.lock ==="
+grep -c 'name = "mypy"' uv.lock 2>/dev/null && echo "FAIL: mypy present in uv.lock" || echo "(none)"
+```
+
+**Pass (master had no mypy):** `[tool.mypy]` absent from `pyproject.toml`; no `mypy` dependency in any dependency group; no `mypy` tox env; no `mypy` make target; `mypy` does not appear as a package in `uv.lock`. Record as ⏭️ Skipped (master did not use mypy — confirmed mypy not introduced).
+
+**Fail (master had no mypy, but PR introduced it):** Report exactly what was introduced (which file, which line) and state it must be removed.
+
+**If master DID use mypy:** Verify it is retained in the PR.
+
+```bash
+python3 << 'PYEOF'
+import tomllib, subprocess, configparser
+
+# Check master's setup.cfg for [mypy] sections
+cfg_raw = subprocess.run(['git', 'show', 'origin/master:setup.cfg'],
+                         capture_output=True, text=True).stdout
+cfg = configparser.ConfigParser()
+cfg.read_string(cfg_raw)
+master_has_mypy_cfg = cfg.has_section('mypy') or any(s.startswith('mypy-') for s in cfg.sections())
+
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+
+tool = data.get('tool', {})
+groups = data.get('dependency-groups', {})
+
+# Check [tool.mypy] present if master had mypy config
+if master_has_mypy_cfg:
+    if 'mypy' not in tool:
+        print("FAIL: master had [mypy] in setup.cfg but [tool.mypy] is absent from pyproject.toml")
+    else:
+        print("OK: [tool.mypy] present")
+
+# Check mypy appears as a dependency
+all_deps = '|'.join(str(d) for g in groups.values() for d in g).lower()
+if 'mypy' not in all_deps:
+    print("FAIL: mypy not in any dependency group — was it dropped?")
+else:
+    print("OK: mypy present in dependency groups")
+PYEOF
+
+echo "=== mypy tox envs on master ==="
+git show origin/master:tox.ini 2>/dev/null | grep -E '^\[testenv.*mypy' || echo "(none)"
+echo "=== mypy tox envs in PR ==="
+grep -E '^\[testenv.*mypy' tox.ini 2>/dev/null || echo "(none)"
+```
+
+**Pass (master had mypy):** `[tool.mypy]` present (with config migrated from master's setup.cfg); mypy in a dependency group; any mypy tox env from master preserved with the same name.
+
+**Fail (master had mypy, but PR dropped it):** Report what is missing and that it must be restored.
 
 
 ### Test 240 — Versioning strategy (consolidated)
@@ -2078,15 +3056,55 @@ else:
     has_scm = any('setuptools-scm' in req for req in build_requires)
     has_scm_config = 'setuptools_scm' in data.get('tool', {})
     if has_scm:
-        print("FAIL: no-PyPI repo has setuptools-scm in build-system.requires — remove it")
+        print("FAIL: no-PyPI repo has setuptools-scm in build-system.requires — remove it; no PyPI publishing means build-time version resolution from git tags serves no purpose")
     if has_scm_config:
         print("FAIL: no-PyPI repo has [tool.setuptools_scm] section — remove it")
     if not version:
         print("FAIL: no-PyPI repo missing static version in [project]")
     elif 'version' in dynamic:
         print("FAIL: no-PyPI repo should not have dynamic version")
-    elif not has_scm and not has_scm_config:
-        print(f"OK: no-PyPI repo has static version = {version!r}")
+    else:
+        # Verify version is not a placeholder and matches master
+        if version in ('', 'x.y.z', '0.0.0', 'PLACEHOLDER'):
+            print(f"FAIL: no-PyPI repo has placeholder version {version!r} — set the real version from master")
+        else:
+            # Cross-check against master's version sources
+            master_version = None
+            # 1. setup.cfg [metadata] version=
+            r = subprocess.run(['git', 'show', 'upstream/main:setup.cfg'], capture_output=True, text=True)
+            if r.returncode == 0:
+                m = re.search(r'^\s*version\s*=\s*(\S+)', r.stdout, re.MULTILINE)
+                if m:
+                    master_version = m.group(1).strip()
+            # 2. package __init__.py __version__ = "x.y.z"
+            if not master_version:
+                pkg_name = data.get('project', {}).get('name', '').replace('-', '_')
+                for init_path in (f'{pkg_name}/__init__.py', f'src/{pkg_name}/__init__.py'):
+                    r = subprocess.run(['git', 'show', f'upstream/main:{init_path}'], capture_output=True, text=True)
+                    if r.returncode == 0:
+                        m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", r.stdout)
+                        if m:
+                            master_version = m.group(1)
+                            break
+            if master_version and master_version != version:
+                print(f"FAIL: no-PyPI repo version {version!r} does not match master version {master_version!r} — use the master version")
+            elif master_version:
+                print(f"OK: no-PyPI repo has static version = {version!r} (matches master)")
+            else:
+                print(f"OK: no-PyPI repo has static version = {version!r} (could not locate master version to cross-check)")
+
+    # readme must be a static field, not dynamic
+    readme_static = project.get('readme')
+    if 'readme' in dynamic:
+        print("FAIL: no-PyPI repo has 'readme' in dynamic — set readme = 'README.rst' as a static field in [project] instead; no PyPI publishing means the dynamic readme setup has no consumer")
+    elif not readme_static:
+        print("WARN: no-PyPI repo has no readme field — consider adding readme = 'README.rst' to [project]")
+    else:
+        print(f"OK: no-PyPI repo has static readme = {readme_static!r}")
+
+    # [tool.setuptools.dynamic] must not exist (it only serves the dynamic readme / PyPI description)
+    if 'dynamic' in data.get('tool', {}).get('setuptools', {}):
+        print("FAIL: no-PyPI repo has [tool.setuptools.dynamic] — remove it; this section only populates the PyPI long-description and has no consumer for a non-publishing repo")
 PYEOF
 ```
 
@@ -2232,11 +3250,9 @@ PYEOF
 
 **Fail:** Any action in a PR-modified file has a lower version than what main/master already pinned.
 
-### Test 300 — CI toxenv uses `py` for test envs (not `py312` or other version-specific name)
+### Test 300 — CI toxenv uses `py` (not `py312`) and Codecov condition is compound
 
-Feanil's rule (mockprock #66): using `py` in the toxenv matrix is more resilient — when `python3.14` is added to `python-version` later, only the `python-version` row needs updating, not `toxenv` too. Bare `py3XX` entries cause a mismatch: the CI might try to run `py312` tests inside a `python3.14` environment.
-
-Named envs like `lint`, `docs`, `quality`, `django42` are unaffected — only bare Python-version test envs (`py312`, `py311`, etc.) are wrong.
+Use `py` for the bare Python test env; the `python-version` matrix drives the interpreter. The Codecov upload condition must be compound — `matrix.toxenv == 'py' && matrix.python-version == '3.12'` — so it pins exactly one job even when the matrix grows.
 
 ```bash
 python3 << 'PYEOF'
@@ -2248,24 +3264,28 @@ for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflo
         content = open(wf_path).read()
     except FileNotFoundError:
         continue
-    # Find bare py3XX entries (e.g., py312) NOT followed by a dash (py312-django42 is a legitimate matrix env name)
+    # Fail if bare py3XX (e.g. py312) appears as a toxenv matrix entry
     for m in re.finditer(r'\bpy3\d{1,2}\b(?![-\w])', content):
         surrounding = content[max(0, m.start()-300):m.end()+50]
         if 'toxenv' in surrounding or 'matrix' in surrounding:
-            failures.append(f"{wf_path}: bare toxenv entry '{m.group(0)}' found — use 'py' instead so python-version matrix drives the interpreter")
+            failures.append(f"{wf_path}: bare toxenv entry '{m.group(0)}' — use 'py' instead")
             break
+    # Check Codecov condition is compound
+    codecov_m = re.search(r"if:\s*matrix\.toxenv\s*==\s*['\"]([^'\"]+)['\"]", content)
+    if codecov_m and not re.search(r"matrix\.python-version\s*==", content):
+        failures.append(f"{wf_path}: Codecov condition missing matrix.python-version check — use compound condition")
 
 if failures:
     for f in failures:
         print(f"FAIL: {f}")
 else:
-    print("OK: no bare version-specific toxenv entries (e.g. py312) in CI matrix")
+    print("OK: toxenv uses 'py' and Codecov condition is compound")
 PYEOF
 ```
 
-**Pass:** CI toxenv matrix contains no bare `py3XX` entries for test runs. Named envs (`lint`, `django42`, etc.) are fine.
+**Pass:** `toxenv` matrix uses `py`; Codecov `if:` includes both `matrix.toxenv` and `matrix.python-version`.
 
-**Fail:** Any toxenv matrix entry matches `py3XX` without a framework suffix (e.g., `py312`, `py311`) — signals the Python version is hardcoded in two places and will break when the matrix is updated.
+**Fail:** `py3XX` in toxenv matrix, or Codecov condition is missing the `matrix.python-version` check.
 
 ### Test 310 — No empty or header-only `codecov.yml` introduced
 
@@ -2583,3 +3603,136 @@ PYEOF
 **Pass:** All isort style settings (`multi_line_output`, `force_sort_within_sections`, etc.) match master's values exactly. No new isort settings introduced that alter import formatting.
 
 **Fail:** Any isort style setting changed vs master — this will cause the linter to reformat existing import blocks, producing noisy diffs and unexpected CI failures.
+
+### Test 370 — No source-tracing comments in `[dependency-groups]`
+
+Comments like `# From requirements/ci.in` or `# Each group mirrors its requirements/*.in file exactly.` trace the migration origin but add no value — the group names and `include-group` entries already document the structure. They should not appear in the committed file.
+
+```bash
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('pyproject.toml').read()
+except FileNotFoundError:
+    print("SKIP: no pyproject.toml found")
+    raise SystemExit(0)
+
+dep_groups_match = re.search(r'^\[dependency-groups\]', content, re.MULTILINE)
+if not dep_groups_match:
+    print("SKIP: no [dependency-groups] section found")
+    raise SystemExit(0)
+
+next_section = re.search(r'^\[', content[dep_groups_match.end():], re.MULTILINE)
+dep_groups_content = content[dep_groups_match.start(): dep_groups_match.end() + (next_section.start() if next_section else len(content))]
+
+BAD_PATTERNS = [
+    (r'#.*\bFrom requirements/', 'source-tracing comment referencing old requirements file'),
+    (r'#.*requirements/.*\.in', 'source-tracing comment referencing old .in file'),
+    (r'#.*Each group mirrors', 'boilerplate migration comment'),
+    (r'#.*-r \S+\.in.*include-group', 'migration mechanics comment explaining .in syntax'),
+    (r'#.*Direct packages.*listed verbatim', 'obvious statement comment'),
+]
+
+failures = []
+for line in dep_groups_content.splitlines():
+    stripped = line.strip()
+    if not stripped.startswith('#'):
+        continue
+    for pattern, description in BAD_PATTERNS:
+        if re.search(pattern, stripped, re.IGNORECASE):
+            failures.append(f"  {description}: {stripped!r}")
+            break
+
+if failures:
+    print("FAIL: source-tracing/unimportant comments found in [dependency-groups]:")
+    for f in failures: print(f)
+    print("  Remove these — group names and include-group entries already document the structure.")
+    raise SystemExit(1)
+else:
+    print("OK: no source-tracing comments in [dependency-groups]")
+PYEOF
+```
+
+**Pass:** No comments inside `[dependency-groups]` reference old `.in` files, explain migration mechanics, or state obvious facts about the file format.
+
+**Fail:** Any such comment is found — remove it. Comments inside `[dependency-groups]` are only warranted when explaining a non-obvious structural decision (e.g. why a legacy Django group exists).
+
+### Test 380 — Required tox environments present (py, quality, docs)
+
+All modernized repos must have three core tox environments: a default test env (`[testenv]`, run as `py` in CI), a quality/lint env, and a docs env. Their absence means CI cannot run the full test matrix and local developers lose the standard entry points.
+
+If `docs` is absent but the repo has no docs infrastructure whatsoever (no `docs/` directory, no `make docs` target, no Sphinx configuration), the omission is acceptable **only if** it is explicitly documented in the PR's `## Important Notes` section.
+
+```bash
+python3 << 'PYEOF'
+import re
+
+try:
+    content = open('tox.ini').read()
+except FileNotFoundError:
+    print("FAIL: tox.ini not found")
+    raise SystemExit(1)
+
+# [testenv] (no suffix) is the default / py env
+has_py = bool(re.search(r'^\[testenv\]', content, re.MULTILINE))
+# quality or lint are both acceptable names
+has_quality = bool(re.search(r'^\[testenv:(quality|lint)\]', content, re.MULTILINE))
+# docs env
+has_docs = bool(re.search(r'^\[testenv:docs\]', content, re.MULTILINE))
+
+failures = []
+if not has_py:
+    failures.append("Missing [testenv] (py env) — all repos must have a default test environment")
+if not has_quality:
+    failures.append("Missing [testenv:quality] (or [testenv:lint]) — all repos must have a quality/lint environment")
+if not has_docs:
+    failures.append(
+        "Missing [testenv:docs] — add it, or if the repo has absolutely no docs infrastructure "
+        "(no docs/ dir, no make docs target, no Sphinx config), verify the omission is documented "
+        "in ## Important Notes of the PR"
+    )
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    raise SystemExit(1)
+else:
+    print(f"OK: required tox environments present (py={has_py}, quality/lint={has_quality}, docs={has_docs})")
+PYEOF
+```
+
+**Pass:** `tox.ini` contains `[testenv]` (default/py env), `[testenv:quality]` or `[testenv:lint]`, and `[testenv:docs]`.
+
+**Fail:** Any of the three required environments is absent — add the missing env, or (for `docs` only) confirm the PR description documents why it cannot be added.
+
+### Test 390 — No manual venv `GITHUB_PATH` echo in CI workflows
+
+When using `astral-sh/setup-uv`, tools must be invoked via `uv run <tool>` — uv handles venv activation automatically. An `echo "$PWD/.venv/bin" >> "$GITHUB_PATH"` line is a sign that tools are still called as bare commands, which defeats the purpose of the uv migration.
+
+```bash
+python3 << 'PYEOF'
+import re, glob
+
+failures = []
+for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+    try:
+        content = open(wf_path).read()
+    except FileNotFoundError:
+        continue
+    for i, line in enumerate(content.splitlines(), 1):
+        if re.search(r'echo\s+.*\.venv[/\\]bin.*GITHUB_PATH', line):
+            failures.append(f"{wf_path}:{i}: {line.strip()!r}")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: manual venv PATH echo found — {f}")
+    print("  Remove these echoes and use 'uv run <tool>' instead.")
+else:
+    print("OK: no manual .venv/bin GITHUB_PATH echoes in CI workflows")
+PYEOF
+```
+
+**Pass:** No `echo "$PWD/.venv/bin" >> "$GITHUB_PATH"` (or similar `.venv/bin` path injection) in any workflow file.
+
+**Fail:** Such an echo exists — remove it and update the tool invocation to use `uv run <tool>`.
