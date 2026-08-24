@@ -2,12 +2,22 @@
 
 Shared [Claude Code](https://claude.ai/code) slash commands for the team.
 
+## Available skills
+
+Invoke explicitly by name, e.g. `/commit`.
+
+| Skill | Description |
+|---|---|
+| `/commit-guide` | Default commit guideline (Open edX conventions). Modes: write (default, applies to any commit) and verify (`/commit-guide v` lints a message) |
+| `/pr-details` | Generate implementation details for a PR description |
+| `/create-stories` | Break a client task into scoped GitHub parent + sub-task issues, plan, then create and link them |
+| ...and more | See the `skills/` directory |
+
 ## Available commands
 
 | Command | Description |
 |---|---|
-| `/commit` | Stage and commit changes following Open edX commit conventions |
-| `/pr-details` | Generate implementation details for a PR description |
+| `/axim-pr-review` | Structured PR review workflow for OpenEdX Axim improvement upgrade emails |
 
 ## Setup
 

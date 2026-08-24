@@ -1,6 +1,24 @@
 ---
-trigger: ALWAYS use this skill (via the Skill tool) when the user asks to commit code. Never run git commit manually — always invoke this skill instead.
+name: commit-guide
+description: The default guideline for committing code following Open edX conventions. ALWAYS use this skill whenever the user asks to commit code, stage changes, or make a commit — never run `git commit` manually, always follow this instead. Two modes — write (default: create a compliant commit; runs on any commit request) and verify (lint an existing/proposed commit message; explicit only via /commit-guide v).
 ---
+
+This skill is the single source of truth for how commits are made in this workspace. **Any time code is being committed, follow the WRITE mode below — do not run a bare `git commit`.**
+
+## Modes
+
+Pick the mode from how the skill was invoked:
+
+| Invocation | Mode | Use when |
+|---|---|---|
+| `/commit-guide`, `/commit-guide w`, or **any request to commit code** | **WRITE** (default) | Creating a commit. This is the default — if no mode is given, or the user simply asks to "commit", use WRITE. |
+| `/commit-guide v` (or `/commit-guide verify`) | **VERIFY** | Explicitly linting a commit message against conventions. Read-only — never commits or amends. |
+
+If invoked with no argument, **default to WRITE**.
+
+---
+
+## WRITE mode (default)
 
 Commit all staged and unstaged changes in the current repository.
 
@@ -75,3 +93,29 @@ After confirming success, output the summary section:
 9. After showing the summary, ask: "Push to remote? (y/n)"
    - If **y**: run `git push` and report the result.
    - If **n**: do nothing.
+
+---
+
+## VERIFY mode (explicit: `/commit-guide v`)
+
+Lint a commit **message** against the Open edX conventions above. This mode is **read-only** — it never stages, commits, amends, or pushes.
+
+1. **Determine the target message:**
+   - If the user pasted a message, lint that.
+   - Otherwise lint the latest commit: `git log -1 --pretty=format:'%B'`.
+
+2. **Check each rule** and report a pass/fail checklist:
+
+   | Check | Rule |
+   |---|---|
+   | Type present | Subject starts with a valid type from the table above (`feat`, `fix`, `docs`, …) |
+   | Breaking marker | If the change breaks compatibility, the type ends with `!` (e.g. `feat!:`) |
+   | Format | Subject is `<type>: <short summary>` (colon + single space) |
+   | Subject length | First line is ≤ 70 characters |
+   | Why-not-what | Body (if present) explains *why*, not a restatement of *what* changed |
+   | Co-author trailer | If a co-author trailer exists, it matches `Co-Authored-By: <Name> <email>` format |
+
+3. **Output:**
+   - The checklist with ✅ / ❌ per row and a one-line reason for each ❌.
+   - A **corrected version** of the message if any check failed.
+   - Do **not** apply the fix. Tell the user they can re-run WRITE mode or amend it themselves.
