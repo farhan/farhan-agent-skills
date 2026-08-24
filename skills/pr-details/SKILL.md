@@ -1,3 +1,8 @@
+---
+name: pr-details
+description: Generate the implementation details section for a PR description in a fixed why-then-what style. Use ONLY when explicitly invoked with /pr-details — do not auto-trigger.
+---
+
 Generate implementation details for a PR description.
 
 If a PR URL or number is provided, fetch the diff and commits using `gh pr diff` and `gh pr view`. Otherwise use the current branch's uncommitted/committed changes.

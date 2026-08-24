@@ -63,7 +63,7 @@ Pick the mode from the user's request. If the request doesn't clearly indicate o
 |---|---|---|
 | **1. Implement/Re-implement** | Repo has no migration yet, or an existing migration PR needs changes | TBD |
 | **2. PR creation** | User asks to generate or write the PR description | Collect migration facts from the diff and produce a formatted PR body |
-| **3. Test/Verify** | User asks to test or verify a migration PR | Run all 33 tests and report every result in one table — no fixes |
+| **3. Test/Verify** | User asks to test or verify a migration PR | Run all tests and report every result in one table — no fixes |
 
 ---
 
@@ -111,7 +111,7 @@ grep -E '^[a-zA-Z_-]+:' Makefile 2>/dev/null
 
 # 7. Stale file check
 for f in .coveragerc CHANGELOG.rst; do [ -f "$f" ] && echo "EXISTS: $f" || echo "absent: $f"; done
-# Note: CHANGELOG.rst is NOT deleted for PyPI repos — it is created/updated with the PSR insertion marker in Step 3.4.
+# Note: CHANGELOG.rst is never created and never deleted. If it exists, Step 3.4 prepends a deprecation note; if absent, leave it absent.
 
 # 8. Current version
 git show HEAD:setup.cfg 2>/dev/null | grep 'version\s*='
@@ -483,7 +483,7 @@ For every line in master's MANIFEST.in, classify it:
 
 | Line type | Action |
 |---|---|
-| `include CHANGELOG.rst` | Drop — CHANGELOG.rst is deleted (PyPI) or kept but not packaged |
+| `include CHANGELOG.rst` | Drop — CHANGELOG.rst is deprecated and not packaged (kept in repo if it exists, else absent) |
 | `include LICENSE.txt`, `include README.rst/md` | Drop — already declared via `license-files` and `readme` in pyproject.toml |
 | `include requirements/*.in`, `include requirements/constraints.txt` | Drop — requirements/ is deleted |
 | `recursive-include <pkg> *.html *.css *.js *.png ...` | **Migrate to `[tool.setuptools.package-data]`** — these are critical install-time assets |
@@ -799,7 +799,10 @@ jobs:
     name: ${{ matrix.toxenv }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      # Do NOT set fail-fast — it defaults to true. Adding it explicitly (whether
+      # `true` or `false`) is an unnecessary deviation from master. Keep the
+      # strategy block in parity with master's CI: if master omitted fail-fast,
+      # omit it here too.
       matrix:
         python-version: ["3.12"]
         toxenv: [quality, docs, py]   # ← no Django: py; with Django: [quality, docs, django42, django52]
@@ -835,6 +838,7 @@ jobs:
 ```
 
 **Parity rules:**
+- **Do not add `fail-fast` to the matrix `strategy:` block.** `fail-fast` defaults to `true`, so setting it explicitly (`true` *or* `false`) is a needless deviation. Omit the key entirely and keep the `strategy:` block in parity with master — if master had no `fail-fast`, the modernized workflow must have none either.
 - SHA-pin ALL actions — no mutable version tags (e.g. `@v4`)
 - **Never downgrade a SHA** — for any action already on master, use its exact SHA or a newer one. Running with an older SHA than master is a regression.
 - **Use `py` for the bare Python test env** (no Django suffix). The `python-version` matrix entry drives the interpreter. With Django matrix: use `django42`, `django52` etc.
@@ -844,6 +848,7 @@ jobs:
 - If master had no Codecov step, do not add one
 - Do not add an `actions/setup-python` step — `astral-sh/setup-uv` handles Python installation via `python-version`
 - **Never use `uv pip install` to override Django (or any package) version in CI.** `uv pip install "django~=X.Y.0"` bypasses the lockfile and is an anti-pattern for this modernization work. Django version selection must happen entirely through `uv sync --group djangoXY` or `uv run tox -e djangoXY` — both of which pull the pinned version from `uv.lock`. If you see a step like `uv pip install "django~=${{ matrix.django-version }}.0"` on master, replace it with the correct `uv sync --group ...` approach.
+- **Preserve master's YAML list style — do not collapse a multi-line block list into a flow list.** If master writes a matrix list in block form (`os:\n  - ubuntu-latest`), keep it in block form; do not reformat it to flow form (`os: [ubuntu-latest]`). Block form keeps the diff clean — adding a new version (e.g. a new Python or OS entry) shows up as a single added line rather than editing an existing line, which is easier to read and to extend. This applies to every matrix list (`os`, `python-version`, `toxenv`, `django-version`, etc.). The template blocks in this skill use flow form only for brevity; match whatever style master already uses.
 - **`codecov.yml` — do not create if absent.** Do not introduce a `codecov.yml` file if it does not already exist on master/main — an empty or header-only file adds noise with no value. If the repo already has one, read it (`git show master:codecov.yml`) and copy its settings verbatim; do not add any threshold, target, or key that is not already there (in particular, do not invent `coverage.status.patch.target` or any numeric threshold).
 
 ---
@@ -861,12 +866,12 @@ jobs:
 #### 3.1 — Add semantic-release config to pyproject.toml
 
 ```toml
-[tool.semantic_release.changelog]
-mode = "update"
-insertion_flag = ".. changelog-insertion-marker"
-
 [tool.semantic_release]
 build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION python -m build"
+
+# Do NOT add a [tool.semantic_release.changelog] section. We no longer manage a
+# changelog file with PSR. Release notes live only on the GitHub Release page
+# (PSR still creates the GitHub Release by default). See Step 3.4.
 
 # Zero-version guard — add ONLY if latest git tag starts with 0.x (e.g. v0.3.1)
 # Omit entirely for 1.x+ repos
@@ -991,18 +996,21 @@ jobs:
     uses: openedx/.github/.github/workflows/commitlint.yml@master
 ```
 
-#### 3.4 — Create or update CHANGELOG.rst
+#### 3.4 — Deprecate CHANGELOG.rst (do NOT wire it to semantic-release)
 
-python-semantic-release will auto-generate and update `CHANGELOG.rst` on every release using the insertion marker. Create or overwrite it with:
+We no longer manage a changelog file with python-semantic-release. Release notes live **only** on the GitHub Release page (PSR still creates the GitHub Release). Do not add a `[tool.semantic_release.changelog]` config or any insertion marker.
 
-```rst
-.. This file is auto-managed by python-semantic-release.
-   Do not edit manually — changes will be overwritten on the next release.
+- **If `CHANGELOG.rst` exists on master:** keep the file, but prepend a deprecation note at the very top (above all existing content — do not delete the old release notes below it):
 
-.. changelog-insertion-marker
-```
+  ```rst
+  .. DEPRECATED: This changelog is no longer maintained. Release notes are
+     published only on the GitHub Releases page:
+     https://github.com/<org>/<repo>/releases
+  ```
 
-If `CHANGELOG.rst` already exists on master with real content, prepend these two lines at the very top and add `.. changelog-insertion-marker` below any existing header. Do not discard existing release notes.
+  Replace `<org>/<repo>` with the actual repo slug.
+
+- **If `CHANGELOG.rst` does NOT exist on master:** do nothing. Do not create it. The repo ships without a changelog file.
 
 ---
 
@@ -1029,7 +1037,7 @@ git rm -r requirements/ 2>/dev/null || true
 # Delete only if it existed on master:
 git rm .coveragerc 2>/dev/null || true
 
-# NEVER delete CHANGELOG.rst — for PyPI repos, Step 3.4 creates/updates it with the PSR insertion marker.
+# NEVER delete CHANGELOG.rst — if it exists, Step 3.4 prepends a deprecation note (it is not wired to PSR).
 
 # NEVER delete — ruff is out of scope:
 # pylintrc, pylintrc_tweaks — leave exactly as on master
@@ -1086,13 +1094,45 @@ Run every check below. Fix any `FAIL:` line before proceeding to Step 6. These c
 ```bash
 echo "======= PRE-PR VALIDATION ======="
 
-# --- Check 1: fail-fast must be true in CI ---
-echo "--- Check 1: fail-fast ---"
-if grep -q 'fail-fast: false' .github/workflows/ci.yml 2>/dev/null; then
-  echo "FAIL: ci.yml has fail-fast: false — must be true"
-else
-  echo "OK: fail-fast is not false"
-fi
+# --- Check 1: fail-fast must NOT be set in CI, and strategy must stay in parity with master ---
+echo "--- Check 1: fail-fast omitted + parity with master ---"
+python3 << 'PYEOF'
+import re, subprocess
+
+WF = '.github/workflows/ci.yml'
+try:
+    pr = open(WF).read()
+except FileNotFoundError:
+    print("SKIP: no ci.yml found")
+    raise SystemExit(0)
+
+# fail-fast defaults to true; it must not appear at all (neither true nor false).
+if re.search(r'^\s*fail-fast\s*:', pr, re.MULTILINE):
+    print("FAIL: ci.yml sets fail-fast explicitly — remove it (it defaults to true; adding it deviates from master)")
+else:
+    print("OK: fail-fast is not set (defaults to true)")
+
+# Parity: whatever master had for fail-fast, the PR must match (master omitted → PR omits).
+base = next((b for b in ('main','master')
+             if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],
+                               capture_output=True).returncode == 0), None)
+if base:
+    for wf in ('ci.yml','python-tests.yml'):
+        r = subprocess.run(['git','show',f'{base}:.github/workflows/{wf}'],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            master_has = bool(re.search(r'^\s*fail-fast\s*:', r.stdout, re.MULTILINE))
+            pr_has     = bool(re.search(r'^\s*fail-fast\s*:', pr, re.MULTILINE))
+            if master_has != pr_has:
+                print(f"FAIL: fail-fast parity broken vs {base}:{wf} — master {'set' if master_has else 'omitted'} it, PR {'sets' if pr_has else 'omits'} it")
+            else:
+                print(f"OK: fail-fast parity with {base}:{wf} preserved")
+            break
+    else:
+        print(f"SKIP: no CI workflow on {base} to compare against")
+else:
+    print("SKIP: no local main/master branch for parity comparison")
+PYEOF
 
 # --- Check 2: toxenv must not use bare py3XX version-specific names ---
 echo "--- Check 2: toxenv py vs py3XX ---"
@@ -1830,7 +1870,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] Makefile `requirements` → `uv sync --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
 - [ ] CI uses `astral-sh/setup-uv`, `uv sync --group ci`, `uv run tox`, named `ci.yml`
-- [ ] CI uses `fail-fast: true`
+- [ ] CI does **not** set `fail-fast` (it defaults to `true`); `strategy:` block in parity with master
 - [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env; Codecov `if:` uses compound condition (`matrix.toxenv == 'py' && matrix.python-version == '3.12'`)
 - [ ] Codecov `if:` condition references the exact toxenv name used in the matrix
 - [ ] All actions SHA-pinned; no SHA is older than what master used
@@ -1843,7 +1883,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] Coverage thresholds match master (no invented `fail_under`)
 - [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
 - [ ] `__version__` in package `__init__.py` uses `importlib.metadata` pattern with `# pragma: no cover` on the `except PackageNotFoundError` line — never remove `__version__` entirely
-- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `CHANGELOG.rst` created/updated with insertion marker and auto-managed note; `[tool.semantic_release.changelog]` + `[tool.semantic_release]` in pyproject.toml; zero-version guard only if 0.x; `## Important Notes` flags OIDC trusted publisher config required
+- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x; `## Important Notes` flags OIDC trusted publisher config required
 - [ ] **Non-PyPI repos:** static `version = "x.y.z"` in `[project]`; no `setuptools-scm`; `## Important Notes` documents why `src/` layout and `release.yml` were not added
 - [ ] `src/` layout decision documented in `## Important Notes` if not adopted
 
@@ -1943,7 +1983,7 @@ Use the template in [PR description format](#pr-description-format). Apply these
 - **`[- Add python-semantic-release + release.yml (OIDC publishing)]` bullet:** include only if `release.yml: PRESENT`.
 - **`[- Add commitlint.yml ...]` bullet:** include only if added in the PR. Always add an `## Important Notes` bullet warning that conventional commit format is now enforced on all future PRs to this repo.
 - **`[- Drop Python X.Y support]` bullet:** include only if `requires-python` changed vs master.
-- **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Include `.coveragerc` only if it existed on master. Never list `CHANGELOG.rst` as deleted — for PyPI repos it is created/updated with the PSR insertion marker (not removed). Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
+- **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Include `.coveragerc` only if it existed on master. Never list `CHANGELOG.rst` as deleted — it is never removed (if it exists, a deprecation note is prepended; if absent, it stays absent). Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
 - **Removed Makefile targets table:** populate from the `=== Targets removed ===` list only. Any target in `=== Targets kept ===` must not appear here, even if its implementation was rewritten. Include a specific reason per row.
 - **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed. For the `requirements` target, the entry must describe `uv sync --group dev` — if the `=== uv tool install tox ===` check in Step 1 flagged a hit, do NOT document it as correct in the table; flag it as a bug to fix before the PR is merged.
 - **`## Python X.Y dropped` section:** present if and only if `requires-python` changed vs master. Omit otherwise.
@@ -2076,6 +2116,7 @@ Template:
 | Test#230 | Mypy not introduced (or retained if present) | ✅ Pass | — OR — ⏭️ Skipped (master did not use mypy — confirmed mypy not introduced) |
 | Test#290 | No action version downgrades | ✅ Pass | all PR-modified workflows use versions ≥ main |
 | Test#300 | CI toxenv uses `py` not `py312` | ✅ Pass | no bare version-specific toxenv entries |
+| Test#305 | CI `fail-fast` not set + strategy parity with master | ✅ Pass | fail-fast omitted (defaults true); strategy matches master |
 | Test#310 | No empty codecov.yml introduced | ✅ Pass | |
 | Test#320 | Tox env names unchanged | ✅ Pass | all master tox env names preserved |
 | Test#330 | tox commands invoke make targets | ✅ Pass | |
@@ -2110,11 +2151,11 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Package build | 30, 70, 80 | Build output complete; package imports; setuptools-scm runtime (PyPI) |
 | Dependency management | 40, 50, 160, 170, 270, 340 | Lockfile in sync; groups resolve; all packages migrated; constraints; static deps; `-r` refs use include-group |
 | Migration parity | 155 | Every field from master's setup.py/setup.cfg (metadata, entry points, tool configs) present in pyproject.toml |
-| Versioning | 240 | Versioning strategy: setuptools-scm (PyPI) or static version (no-PyPI), including 0.x guard |
+| Versioning | 240, 245, 246 | Versioning strategy: setuptools-scm (PyPI) or static version (no-PyPI), including 0.x guard; PSR `tag_format` matches existing release tags (245, offline) and a matching baseline tag exists for the latest PyPI release (246, ground-truth) — else manual baseline tag required |
 | Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
 | Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
 | Makefile | 20, 140, 350 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox) |
-| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 390 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; no manual venv PATH echo |
+| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
@@ -2208,7 +2249,7 @@ Check that the tarball includes **all** of the following (adjust paths to match 
 | Static assets (e.g. `*.html`, `*.css`, `*.js`, `*.png` under the package) | Any non-`.py` file referenced by `package_data` or `MANIFEST.in` |
 
 Flag as a failure if:
-- Deleted files (`setup.py`, `setup.cfg`, `CHANGELOG.rst`) appear in the tarball — they should not be included after deletion.
+- Deleted files (`setup.py`, `setup.cfg`) appear in the tarball — they should not be included after deletion. `CHANGELOG.rst` (if present) is deprecated and must not be packaged either.
 - The source package directory is missing or empty.
 - Static assets that existed before the migration are absent — their absence will break installs.
 
@@ -2392,16 +2433,17 @@ for f in setup.py setup.cfg .coveragerc; do
 done
 [ -d requirements ] && echo "STALE: requirements/ still exists" || echo "OK: requirements/ absent"
 
-# CHANGELOG.rst — PyPI repos must HAVE it (with insertion marker); non-PyPI repos keep it as-is
-if [ -f .github/workflows/release.yml ]; then
-  # PyPI repo
-  if [ ! -f CHANGELOG.rst ]; then
-    echo "MISSING: CHANGELOG.rst — PyPI repos must have CHANGELOG.rst with .. changelog-insertion-marker"
-  elif grep -q "changelog-insertion-marker" CHANGELOG.rst; then
-    echo "OK: CHANGELOG.rst present with insertion marker"
-  else
-    echo "FAIL: CHANGELOG.rst exists but missing '.. changelog-insertion-marker'"
-  fi
+# CHANGELOG.rst — never created, never deleted. If present it must be deprecated and must NOT be wired to PSR.
+if grep -rq "changelog-insertion-marker" CHANGELOG.rst pyproject.toml 2>/dev/null; then
+  echo "FAIL: changelog-insertion-marker found — CHANGELOG.rst must not be wired to semantic-release"
+elif grep -q "tool.semantic_release.changelog" pyproject.toml 2>/dev/null; then
+  echo "FAIL: [tool.semantic_release.changelog] present — remove it; changelog is not PSR-managed"
+elif [ -f CHANGELOG.rst ]; then
+  grep -qi "DEPRECATED" CHANGELOG.rst \
+    && echo "OK: CHANGELOG.rst present with deprecation note" \
+    || echo "FAIL: CHANGELOG.rst present but missing deprecation note (see Step 3.4)"
+else
+  echo "OK: CHANGELOG.rst absent — leave it absent"
 fi
 
 # pylintrc / pylintrc_tweaks must be KEPT this cycle (ruff out of scope)
@@ -3161,6 +3203,142 @@ PYEOF
 
 **Pass:** `setuptools` has no version specifier; PyPI repos use setuptools-scm with `dynamic = ["version"]`; 0.x repos have the zero-version guard; 1.x+ repos do not. No-PyPI repos use a static `version` field with no `setuptools-scm` present.
 
+### Test 245 — PSR `tag_format` matches existing release tags (manual baseline tag required on mismatch)
+
+python-semantic-release determines the last released version by reading **git tags only** — never PyPI, never a version file. It inverts `tag_format` into a regex (default `tag_format = "v{version}"` → `^v(?P<version>.+)$`) and **silently discards every tag that does not match**. A repo whose historical tags are bare (`0.4.3`, `0.4.2`, …) is therefore invisible to a default-config PSR: it re-derives versions from `0.0.0`, so it either refuses to release (`No release will be made, X already released`) or publishes a wrong/duplicate version. Detect the mismatch and, if present, **fail** and emit the exact `v`-prefixed baseline tag that must be published manually before the first automated release.
+
+```bash
+python3 << 'PYEOF'
+import tomllib, subprocess, re
+
+# Gate: only PyPI repos use python-semantic-release for versioning/releases
+NON_PYPI_REPOS = {
+    'credentials-themes', 'mockprock', 'edx-repo-health',
+    'openedx-webhooks-data-schema', 'enterprise-catalog', 'enterprise-access',
+    'enterprise-subsidy', 'xapi-db-load', 'codejail-service',
+    'openedx-user-groups', 'cc2olx', 'pr_watcher_notifier',
+}
+remote = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                        capture_output=True, text=True).stdout.strip()
+m = re.search(r'/([^/]+?)(?:\.git)?$', remote)
+repo_name = m.group(1) if m else ''
+if repo_name in NON_PYPI_REPOS:
+    print(f"SKIP: {repo_name!r} is a non-PyPI repo — python-semantic-release tag history does not apply")
+    raise SystemExit
+
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+sr = data.get('tool', {}).get('semantic_release', {})
+
+# PSR default when tag_format is unset
+tag_format = sr.get('tag_format', 'v{version}')
+if '{version}' not in tag_format:
+    print(f"FAIL: [tool.semantic_release].tag_format = {tag_format!r} has no {{version}} placeholder")
+    raise SystemExit
+
+# Replicate PSR's VersionTranslator._invert_tag_format_to_re: escape, then sub {version}
+psr_re = re.compile('^' + re.escape(tag_format).replace(re.escape('{version}'), r'(?P<version>.+)') + '$')
+
+def find_ver(s):
+    # Extract an X.Y.Z anywhere in the tag, so this works for ANY tag_format prefix
+    # (v0.4.3, 0.4.3, release-0.4.3, ...), not just the default 'v{version}'.
+    mm = re.search(r'(\d+)\.(\d+)\.(\d+)', s)
+    return tuple(int(x) for x in mm.groups()) if mm else None
+
+tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.split()
+
+all_vers = {}   # version tuple -> raw tag  (across ALL release tags on the repo)
+psr_vers = {}   # version tuple -> raw tag  (only tags PSR can see via tag_format)
+for t in tags:
+    v = find_ver(t)
+    if v is None:
+        continue
+    all_vers.setdefault(v, t)
+    if psr_re.match(t):
+        psr_vers.setdefault(v, t)
+
+if not all_vers:
+    print("OK: no release tags yet — PSR will start fresh; the first automated release creates the baseline tag")
+    raise SystemExit
+
+true_latest = max(all_vers)
+psr_latest = max(psr_vers) if psr_vers else None
+
+if psr_latest == true_latest:
+    print(f"OK: latest release tag {all_vers[true_latest]!r} matches tag_format {tag_format!r} — PSR sees the correct baseline")
+else:
+    ver_str = '.'.join(map(str, true_latest))
+    suggest_tag = tag_format.format(version=ver_str)   # e.g. 'v0.4.3'
+    latest_raw = all_vers[true_latest]
+    seen = psr_vers[psr_latest] if psr_latest else '(none — PSR would restart from 0.0.0)'
+    print("FAIL: python-semantic-release cannot see the repo's true latest release.")
+    print(f"      Latest release tag on the repo:        {latest_raw!r}  (version {ver_str})")
+    print(f"      Highest tag PSR sees via tag_format {tag_format!r}: {seen}")
+    print( "      PSR reads git tags ONLY; tags not matching tag_format are ignored, so it will")
+    print( "      re-derive versions from scratch and either refuse to release or publish a wrong version.")
+    print( "      REQUIRED MANUAL STEP before the first automated release —")
+    print(f"      publish a matching baseline tag (starts with 'v' per PSR's default tag_format):")
+    print(f"          SUGGEST-TAG: {suggest_tag}")
+    print(f"          git tag {suggest_tag} <latest-released-commit-sha>")
+    print(f"          git push origin {suggest_tag}")
+PYEOF
+```
+
+**Pass:** the highest release version present on the repo is carried by a tag that matches `[tool.semantic_release].tag_format` (or the repo has no release tags yet). **Fail:** the true latest release is on a tag PSR cannot parse (e.g. bare `0.4.3` under the default `v{version}` format) — the report must surface the printed `SUGGEST-TAG` and state that manually publishing that `v`-prefixed tag on the latest released commit is required before automated releases will work.
+
+### Test 246 — PSR baseline tag exists for the latest PyPI release (ground-truth anchor)
+
+Test 245 is offline and compares tags against each other, so it can pass on a repo whose release history was already corrupted by broken PSR runs (a stray `v0.4.5` masks that PyPI is really at `0.4.3`). This test anchors on the **actual published state**: it fetches the latest version from PyPI and fails unless a `tag_format`-matching git tag exists for it. Network-dependent, so it **SKIPs** (does not error) when PyPI is unreachable, preserving the suite's determinism.
+
+```bash
+python3 << 'PYEOF'
+import tomllib, subprocess, json, re
+
+NON_PYPI_REPOS = {
+    'credentials-themes', 'mockprock', 'edx-repo-health',
+    'openedx-webhooks-data-schema', 'enterprise-catalog', 'enterprise-access',
+    'enterprise-subsidy', 'xapi-db-load', 'codejail-service',
+    'openedx-user-groups', 'cc2olx', 'pr_watcher_notifier',
+}
+remote = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                        capture_output=True, text=True).stdout.strip()
+m = re.search(r'/([^/]+?)(?:\.git)?$', remote)
+repo_name = m.group(1) if m else ''
+if repo_name in NON_PYPI_REPOS:
+    print(f"SKIP: {repo_name!r} is a non-PyPI repo"); raise SystemExit
+
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+sr = data.get('tool', {}).get('semantic_release', {})
+tag_format = sr.get('tag_format', 'v{version}')     # PSR default when unset
+pkg = data.get('project', {}).get('name', repo_name)
+
+# Ground truth: latest published version on PyPI (curl avoids Python SSL-store issues)
+r = subprocess.run(['curl', '-fsS', f'https://pypi.org/pypi/{pkg}/json'],
+                   capture_output=True, text=True)
+if r.returncode != 0 or not r.stdout.strip():
+    print(f"SKIP: could not reach PyPI for {pkg!r} (offline or unpublished) — rely on Test 245"); raise SystemExit
+pypi_latest = json.loads(r.stdout)['info']['version']
+
+tags = set(subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.split())
+expected = tag_format.format(version=pypi_latest)
+if expected in tags:
+    print(f"OK: baseline tag {expected!r} exists for the latest PyPI release ({pypi_latest})")
+else:
+    psr_re = re.compile('^' + re.escape(tag_format).replace(re.escape('{version}'), r'(?P<version>.+)') + '$')
+    visible = sorted(t for t in tags if psr_re.match(t))
+    print(f"FAIL: python-semantic-release cannot see the latest PUBLISHED release ({pypi_latest}).")
+    print(f"      Expected a tag_format {tag_format!r} tag: {expected!r} — not found.")
+    print(f"      Tags PSR can currently see: {visible or '(none — PSR would restart from 0.0.0)'}")
+    print(f"      PSR reads git tags ONLY (never PyPI); it will not treat {pypi_latest} as released and will mis-version the next release.")
+    print(f"      REQUIRED MANUAL STEP — publish the baseline tag (starts with 'v' per PSR's default tag_format):")
+    print(f"          SUGGEST-TAG: {expected}")
+    print(f"          git tag {expected} <commit-of-{pypi_latest}> && git push origin {expected}")
+PYEOF
+```
+
+**Pass:** a `tag_format`-matching tag exists for the version currently on PyPI (or PyPI is unreachable/unpublished → SKIP). **Fail:** no matching tag exists for the latest published version — surface the printed `SUGGEST-TAG` and require manually publishing that `v`-prefixed tag on the released commit before automated releases will compute the right version.
+
 ### Test 250 — uv run tox in CI (not bare tox)
 
 ```bash
@@ -3337,6 +3515,125 @@ PYEOF
 **Pass:** `toxenv` matrix uses `py`; Codecov `if:` includes both `matrix.toxenv` and `matrix.python-version`.
 
 **Fail:** `py3XX` in toxenv matrix, or Codecov condition is missing the `matrix.python-version` check.
+
+### Test 305 — CI `fail-fast` not set and `strategy:` in parity with master
+
+`fail-fast` defaults to `true`, so the modernized CI must **not** set it — neither `fail-fast: true` nor `fail-fast: false`. Setting it explicitly is a needless deviation from master. The matrix `strategy:` block must stay in parity with master: if master omitted `fail-fast`, the PR must omit it too.
+
+```bash
+python3 << 'PYEOF'
+import re, subprocess, glob
+
+failures = []
+
+# 1. No workflow in the PR may set fail-fast (it defaults to true).
+for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+    try:
+        content = open(wf_path).read()
+    except FileNotFoundError:
+        continue
+    m = re.search(r'^\s*fail-fast\s*:\s*(\S+)', content, re.MULTILINE)
+    if m:
+        failures.append(f"{wf_path}: sets 'fail-fast: {m.group(1)}' — remove it (defaults to true; deviates from master)")
+
+# 2. Parity: master's fail-fast presence must equal the PR's.
+base = next((b for b in ('main','master')
+             if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],
+                               capture_output=True).returncode == 0), None)
+if base:
+    for wf in ('ci.yml','python-tests.yml'):
+        r = subprocess.run(['git','show',f'{base}:.github/workflows/{wf}'],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            master_has = bool(re.search(r'^\s*fail-fast\s*:', r.stdout, re.MULTILINE))
+            try:
+                pr = open('.github/workflows/ci.yml').read()
+            except FileNotFoundError:
+                pr = ''
+            pr_has = bool(re.search(r'^\s*fail-fast\s*:', pr, re.MULTILINE))
+            if master_has != pr_has:
+                failures.append(f"fail-fast parity broken vs {base}:{wf} — master {'set' if master_has else 'omitted'} it, PR {'sets' if pr_has else 'omits'} it")
+            break
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+else:
+    print("OK: no fail-fast set in any workflow; strategy in parity with master")
+PYEOF
+```
+
+**Pass:** No workflow sets `fail-fast` (neither `true` nor `false`), and master's `fail-fast` presence matches the PR's (master omitted → PR omits).
+
+**Fail:** Any workflow sets `fail-fast` explicitly, or the PR adds/removes `fail-fast` relative to master, breaking `strategy:` parity.
+
+### Test 306 — Matrix list style parity (no block→flow reformat)
+
+Feanil's rule (openedx-webhooks #440): a matrix list master wrote in block form
+(`os:\n  - ubuntu-latest`) must **not** be collapsed to flow form (`os: [ubuntu-latest]`).
+Block form keeps the diff clean — a new version is a single added line, not an edit to an
+existing line — and is easier to extend. Applies to every matrix list: `os`, `python-version`,
+`toxenv`, `django-version`, etc. Only flags keys present in both master and the PR; genuinely new
+keys are exempt.
+
+```bash
+python3 << 'PYEOF'
+import re, subprocess
+
+base = next((b for b in ('main','master')
+             if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],
+                               capture_output=True).returncode == 0), None)
+
+def list_styles(text):
+    """Map each matrix key to 'flow' (key: [..]) or 'block' (key:\\n  - ..)."""
+    styles = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r'^(\s*)([\w-]+)\s*:\s*(.*)$', line)
+        if not m:
+            continue
+        indent, key, rest = m.group(1), m.group(2), m.group(3).strip()
+        if rest.startswith('['):
+            styles[key] = 'flow'
+        elif rest == '':
+            # look ahead: next non-blank more-indented line a '- ' item?
+            for nxt in lines[i+1:]:
+                if not nxt.strip():
+                    continue
+                if len(nxt) - len(nxt.lstrip()) > len(indent) and nxt.lstrip().startswith('- '):
+                    styles[key] = 'block'
+                break
+    return styles
+
+failures = []
+if base:
+    r = subprocess.run(['git','show',f'{base}:.github/workflows/ci.yml'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        r = subprocess.run(['git','show',f'{base}:.github/workflows/python-tests.yml'],
+                           capture_output=True, text=True)
+    if r.returncode == 0:
+        master = list_styles(r.stdout)
+        try:
+            pr = list_styles(open('.github/workflows/ci.yml').read())
+        except FileNotFoundError:
+            pr = {}
+        for key, m_style in master.items():
+            if m_style == 'block' and pr.get(key) == 'flow':
+                failures.append(f"matrix '{key}': master used block form, PR collapsed to flow "
+                                f"[...] — restore block form (see Feanil openedx-webhooks#440)")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+else:
+    print("OK: no matrix list reformatted from block to flow vs master")
+PYEOF
+```
+
+**Pass:** No matrix list that master wrote in block form is collapsed to flow form in the PR.
+
+**Fail:** Any block-form matrix list (`key:\n  - item`) on master appears as flow form (`key: [item]`) in the PR.
 
 ### Test 310 — No empty or header-only `codecov.yml` introduced
 

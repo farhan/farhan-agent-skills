@@ -48,7 +48,8 @@ for dir in "$SKILLS_SRC"/*/; do
     echo "  installing: $name"
   fi
 
-  ln -sf "$dir" "$target"
+  # -n so an existing symlinked dir is replaced, not followed (avoids nesting a self-link inside it)
+  ln -sfn "$dir" "$target"
 done
 
 echo ""
