@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: pr-details
 description: Generate the implementation details section for a PR description in a fixed why-then-what style. Use ONLY when explicitly invoked with /pr-details — do not auto-trigger.
 ---

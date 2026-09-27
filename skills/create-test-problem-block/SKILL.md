@@ -1,5 +1,6 @@
 ---
 name: create-test-problem-block
+disable-model-invocation: true
 description: Full 3-step problem block test workflow. Step 1 builds a 92-unit Open edX course in Studio (11 subsections: 9 automatable + "Code Jail Code Blocks" + "Hard/Manual Testing Blocks", OLX populated, published, user enrolled). Step 2 clones it as a "-Wrong Submissions" re-run course for wrong-answer testing. Step 3 runs Playwright headed Chrome to submit correct answers on the original (70 automatable units, verify all show Correct), spot-check the re-run, then submit wrong answers on the re-run (verify all show Incorrect). Use when asked to "set up problem block testing", "create problem block test course", "build the problem block test structure", or "run problem block browser tests".
 argument-hint: [studio-url] [lms-url] [username] [password]
 allowed-tools: Bash(curl:*), Bash(python3:*), Bash(grep:*), Bash(cat:*), Bash(find:*), Bash(ls:*), Bash(rm:*)

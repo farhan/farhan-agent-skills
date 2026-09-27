@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: fix-checks
 description: Run ONLY when the user explicitly says "fix-checks". Finds the PR (asks if not given), checks out the branch locally, sets up a test environment, reproduces failing CI checks, fixes them in a loop until all pass, cleans up the fix, and pushes a proper commit.
 argument-hint: [pr-number-or-url]

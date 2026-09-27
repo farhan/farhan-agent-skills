@@ -1,5 +1,6 @@
 ---
 name: review-code-commit
+disable-model-invocation: true
 description: Review uncommitted git changes for bugs, typos, correctness issues, and security concerns before committing
 argument-hint: [directory]
 ---

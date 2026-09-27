@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: create-stories
 description: Break a client task description into well-scoped GitHub parent + sub-task issues, present an iterable plan for approval, then create and link them. Use ONLY when explicitly invoked with /create-stories — do not auto-trigger.
 ---
