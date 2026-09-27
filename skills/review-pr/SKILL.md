@@ -7,6 +7,14 @@ allowed-tools: Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh pr view:*),
 
 # PR Review Skill
 
+> **CRITICAL RULE — APPLIES TO EVERY FINDING IN THIS REVIEW:**
+> Only report issues that are **directly caused by code introduced in this PR** (i.e. lines that appear as `+` in the diff).
+> - Do NOT flag pre-existing issues that exist on the base branch and were carried forward unchanged.
+> - Do NOT flag issues in context lines, unmodified files, or surrounding code the PR didn't touch.
+> - If a problem existed on `master`/`main` before this PR, it is out of scope — silently ignore it.
+> - Every finding must cite a specific `+` line from the diff as its evidence.
+> Violating this rule produces noise that wastes reviewer time and obscures real regressions.
+
 **Base skill:** Invoke the built-in `/review` skill first to perform the core PR review.
 
 ```
@@ -68,12 +76,6 @@ Look for changes that shouldn't be in this PR:
 - Accidentally committed debug files, `.env` files, build artifacts
 - Merge conflict markers left in code (`<<<<<<<`, `=======`, `>>>>>>>`)
 - Version bumps or lockfile changes that are unintentional
-
-### Scope Rule (strictly enforced)
-
-Every finding MUST be rooted in a line that appears in the PR diff (`+` or `-` lines). Do NOT flag issues in surrounding context lines, unchanged files, or pre-existing code the PR didn't touch — even if you spot a general improvement opportunity. The review is of what changed, not of the codebase at large.
-
-**Never recommend improvements to code the PR didn't change.** If you notice a pre-existing issue in surrounding context, silently ignore it.
 
 ### Additional Report Sections
 
