@@ -1,9 +1,9 @@
 ---
 name: commit-guide
-description: The default guideline for committing code following Open edX conventions. ALWAYS use this skill whenever the user asks to commit code, stage changes, or make a commit — never run `git commit` manually, always follow this instead. Two modes — write (default: create a compliant commit; runs on any commit request) and verify (lint an existing/proposed commit message; explicit only via /commit-guide v).
+description: The default guideline for committing code following Open edX conventions. ALWAYS invoke this skill BEFORE any `git commit` — whether the user asked for the commit or the agent is about to commit on its own (e.g. as a step inside another skill, workflow, or fix loop). Never run `git commit` without following this skill first. Two modes — write (default: create a compliant commit; runs on any commit, user- or agent-initiated) and verify (lint an existing/proposed commit message; explicit only via /commit-guide v).
 ---
 
-This skill is the single source of truth for how commits are made in this workspace. **Any time code is being committed, follow the WRITE mode below — do not run a bare `git commit`.**
+This skill is the single source of truth for how commits are made in this workspace. **Any time code is being committed — by the user's request or by the agent's own decision (including as a step inside another skill) — follow the WRITE mode below. Do not run a bare `git commit`.**
 
 ## Modes
 
@@ -11,7 +11,7 @@ Pick the mode from how the skill was invoked:
 
 | Invocation | Mode | Use when |
 |---|---|---|
-| `/commit-guide`, `/commit-guide w`, or **any request to commit code** | **WRITE** (default) | Creating a commit. This is the default — if no mode is given, or the user simply asks to "commit", use WRITE. |
+| `/commit-guide`, `/commit-guide w`, **any request to commit code**, or **the agent is about to run `git commit`** | **WRITE** (default) | Creating a commit. This is the default — if no mode is given, the user simply asks to "commit", or the agent decides to commit on its own, use WRITE. |
 | `/commit-guide v` (or `/commit-guide verify`) | **VERIFY** | Explicitly linting a commit message against conventions. Read-only — never commits or amends. |
 
 If invoked with no argument, **default to WRITE**.
