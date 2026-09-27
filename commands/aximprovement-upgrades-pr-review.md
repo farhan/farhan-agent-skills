@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 trigger: NEVER auto-trigger this skill. Only invoke it when the user explicitly types "/axim-pr-review" by exact name.
 ---
 

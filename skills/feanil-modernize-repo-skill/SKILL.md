@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: feanil-modernize-repo-skill
 description: >
   Reviewer's playbook for the Python-modernization class of Open edX PRs (uv + pyproject.toml

@@ -1,5 +1,6 @@
 ---
 name: modernize-python-repos
+disable-model-invocation: true
 description: >
   Modernize an Open edX Python repo to use uv, pyproject.toml (PEP 621/735), optional src/ layout
   (if publishing to PyPI), and python-semantic-release. Three modes: Implement/Re-implement (create or update

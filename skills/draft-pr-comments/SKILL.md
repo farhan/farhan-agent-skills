@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: draft-pr-comments
 description: Draft PR review comments from review notes, a comment, or file content. Maps each point to exact file/line references in the PR diff, creates them as a pending GitHub review draft (inline and file-level), and puts unanchorable points as a numbered list with reasons in the review body. Everything goes into one pending review draft. Use when specified explicitly with "draft-pr-comments" or a direct reference to this skill.
 version: 1.1.0

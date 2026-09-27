@@ -1,5 +1,6 @@
 ---
 name: address-copilot-change-requests
+disable-model-invocation: true
 description: Address GitHub Copilot change requests on a PR. Resolves well-recommended suggestions with code changes, replies to others with a short comment, then commits and prompts for push.
 version: 1.0.0
 allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh api:*), Bash(gh repo view:*), Bash(git log:*), Bash(git diff:*), Bash(git checkout:*), Bash(git status:*), Bash(git fetch:*), Read, Edit, Write
