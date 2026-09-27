@@ -24,22 +24,19 @@ Commit all staged and unstaged changes in the current repository.
 
 Follow these steps exactly:
 
-1. **Before doing anything else, ask the user:** "Add Claude as co-author? (y/n)"
-   - Wait for the response before proceeding.
-   - If **y**: include the co-author trailer in the commit message.
-   - If **n**: omit it entirely.
+1. **Always include the Claude co-author trailer** in every commit message — do not ask. Use the active model's trailer (e.g. `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
 
 2. Run `git status` to see what files have changed.
 3. Run `git diff HEAD` to review all changes (staged and unstaged).
 4. Run `git log --oneline -5` to match the existing commit message style.
 5. Stage only the relevant changed files (never use `git add -A` or `git add .` blindly — add specific files by name).
-6. Choose the commit type from the Open edX standard below. If the commit mixes types, use the highest-priority type per this order: `revert > feat > fix > perf > docs > test > build > refactor > style > chore > temp`.
+6. Choose the commit type from the Open edX standard below (per [OEP-0051](https://open-edx-proposals.readthedocs.io/en/latest/best-practices/oep-0051-bp-conventional-commits.html)). If the commit mixes types, use the highest-priority type per this order: `revert > feat > fix > perf > docs > test > build > refactor > style > chore > temp`.
 
    | Type | When to use |
    |---|---|
    | `build` | Build/release tooling: Makefile, tox.ini, CI/CD, GitHub Actions |
    | `chore` | Repetitive mechanical tasks: updating requirements, translations |
-   | `docs` | Documentation only: READMEs, ADRs, docstrings, comments, annotations |
+   | `docs` | Documentation-only changes: READMEs, ADRs, docstrings, comments, annotations. Docs that accompany other work belong in *that* commit, not a separate `docs` commit |
    | `feat` | New or changed feature, public API entry points or behavior |
    | `<type>!` | Breaking change — append `!` to **any** type, e.g. `feat!: remove the ability to author courses` |
    | `fix` | Bug fixes, behavioral corrections, security vulnerability mitigations |
@@ -47,31 +44,24 @@ Follow these steps exactly:
    | `refactor` | Code reorganization with no behavior change from consumer perspective |
    | `revert` | Undo a previous commit (include original commit message in body) |
    | `style` | Code style/formatting improvements |
-   | `test` | Test-only changes: adding missing tests or correcting existing ones |
+   | `test` | Test-only changes: adding missing tests or correcting existing ones. Tests that accompany other work belong in *that* commit, not a separate `test` commit |
    | `temp` | Temporary/exploratory changes not meant to be permanent |
+
+   **Separating commits:** Split changes so each commit is easy to review and understand. Some types combine well — a feature together with its tests and documentation. But `refactor`, `style`, `chore`, and `temp` changes should be their own commits, separate from more significant work. When staging, group files accordingly rather than lumping unrelated types together.
 
    **Breaking changes:** Append `!` after the type label whenever the change breaks backwards compatibility. This applies to any type, not just `feat`. Examples:
    - `feat!: remove the ability to author courses`
    - `fix!: drop support for the legacy enrollment API`
    - `refactor!: rename CourseKey to CourseLocator throughout public API`
 
-7. Write a concise commit message that focuses on the *why*, not the *what*. The first line (`<type>: <short summary>`) MUST be 70 characters or fewer. Format (with co-author):
+7. Write a concise commit message that focuses on the *why*, not the *what*. The first line (`<type>: <short summary>`) MUST be 70 characters or fewer. Always end with the co-author trailer for the active model:
    ```
    git commit -m "$(cat <<'EOF'
    <type>: <short summary>
 
    <optional body if needed>
 
-   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
-   EOF
-   )"
-   ```
-   Format (without co-author):
-   ```
-   git commit -m "$(cat <<'EOF'
-   <type>: <short summary>
-
-   <optional body if needed>
+   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
    EOF
    )"
    ```
@@ -83,7 +73,7 @@ After confirming success, output the summary section:
 **Commit Summary**
 
 - Total commits made: <N>
-- Co-author included: Yes / No
+- Co-author included: Yes (always)
 - Commit message(s):
   1. `<hash>` — <commit message>
   (add more lines if multiple commits were made)

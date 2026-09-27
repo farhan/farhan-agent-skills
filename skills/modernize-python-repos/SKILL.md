@@ -155,16 +155,18 @@ Before proceeding, summarize:
 | `CHANGELOG.rst` | exists / absent |
 | `constraints.txt` | exists / absent |
 | MANIFEST.in asset lines | e.g. `recursive-include pkg *.html *.js` |
-| CI action SHAs | e.g. `actions/checkout@<SHA> # v4.1.0` |
+| CI action SHAs | e.g. `actions/checkout@<SHA> # v7.0.1` |
 
 **Reference — cross-check pyproject.toml structure against the org reference repo:**
 `openedx/sample-plugin` → `backend-plugin-sample/pyproject.toml` is the org-canonical example for `[build-system]`, `[tool.setuptools_scm]`, `[tool.semantic_release]`, and action SHA pinning style. Read it and match its structure for those sections.
 
-**Also produce two inventory tables before touching any file:**
+**Also produce three inventory tables before touching any file:**
 
 **Table A — Makefile targets (current state):** list every `make` target (from command #6 above), what tool it invokes, and whether that tool is being removed by this migration. Mark only pip-compile/setup.py targets as "removed"; everything else is "keep + adapt". This is the baseline for the Makefile audit and the removed-targets table in the PR description.
 
 **Table B — CI steps (current state):** list every step in the existing CI workflow (from command #10 above) and what it runs. This is the baseline for CI parity — every tool that ran in the old CI must appear in the new CI matrix.
+
+**Table C — `requirements/*.in` → dependency-group mapping:** discover the actual `.in` files (`git ls-tree master:requirements | grep '\.in$'` — do NOT assume canonical names; legacy repos use `sandbox.in`/`testing.in`/`tox.in`/`development.in`/`pip_tools.in`). For **every** `.in` file, record one row: the target group name, OR the deviation shape (canonical-rename / role-split / `-r`-only / documented-drop) with its reason. This table is the accountability gate — no `.in` file may be left unlisted — and it drives the group-mapping rules in Step 2.1. Every direct package in every `.in` must end up somewhere in `pyproject.toml` (a group or `[project].dependencies`) unless it is an explicit documented-drop.
 
 ---
 
@@ -319,10 +321,13 @@ build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSIO
 # allow_zero_version = true
 # major_on_zero = false
 
-[tool.semantic_release.commit_parser_options]
-# Because this repo is meant to be an example, docs changes are relevant
-# feature changes and so should produce new releases.
-minor_tags = ["feat", "docs"]
+# Do NOT add [tool.semantic_release.commit_parser_options]. Per
+# public-engineering#506, other libraries use PSR's DEFAULT release tags
+# (minor: feat; patch: fix, perf). The org-canonical backend-plugin-sample
+# overrides these (minor adds "docs", patch adds "build") ONLY because it is a
+# deliberate example-repo exception — #506 says not to copy that. Add an
+# override here only if this specific repo has a documented reason to release
+# on other commit types.
 
 [tool.setuptools_scm]
 version_scheme = 'only-version'
@@ -351,6 +356,7 @@ uv_constraints = [
 **Adaptation rules after writing the initial template:**
 - Replace `<package-name>`, `<short description>`, and `<repo-name>` from `setup.cfg`/`setup.py`
 - Set `license` to the correct SPDX identifier from `setup.cfg` (e.g. `"Apache-2.0"`)
+- `authors` must **always** be exactly `[{name = "Open edX Project", email = "oscm@openedx.org"}]` — do not copy whatever was in `setup.cfg` or `setup.py`; this is the org-standard value for all repos
 - Verify the README filename on disk (`README.rst` vs `README.md`) and update `[tool.setuptools.dynamic]`; remove `readme` from `dynamic` if you set it as a static `readme =` field above
 - Remove `[project.entry-points]` sections that have no entries on master
 - Keep only the Django `Framework ::` classifiers that match the versions actually tested
@@ -540,15 +546,10 @@ uv run python -m build
 Use this exact block for both PyPI and non-PyPI repos:
 
 ```python
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 
-try:
-    __version__ = version("<package-name>")
-except PackageNotFoundError:  # pragma: no cover
-    __version__ = "unknown"
+__version__ = version("<package-name>")
 ```
-
-The `# pragma: no cover` is **required** on the `except` line — the package is always installed during test runs, so this branch is unreachable in tests and will cause codecov failures if not excluded.
 
 - **PyPI repo:** The hardcoded `__version__ = "x.y.z"` string is removed; the value is now derived from git tags via setuptools-scm at build time and from package metadata at runtime.
 - **Non-PyPI repo:** The hardcoded string is replaced with the same importlib.metadata pattern. Also update any caller (e.g. `docs/conf.py`) to use `importlib.metadata.version("<package-name>")` instead of reading the source file with a regex.
@@ -633,11 +634,20 @@ dev = [
 
 **Group mapping rules:**
 - `requirements/base.in` → `[project].dependencies` (runtime deps — never a dependency group)
-- Every other `.in` file → a dependency group with the same base name (e.g. `test.in` → `test`, `ci.in` → `ci`, `dev.in` → `dev`)
+- **Map every other `.in` file to a dependency group by default.** Prefer a group of the **same base name** (`test.in` → `test`, `ci.in` → `ci`, `dev.in` → `dev`). Deviate ONLY for one of the four strong reasons below, and record the reason in Table C:
+  - **Canonical-rename** — a legacy name maps to the standard group name: `tox.in` → `ci`, `development.in` → `dev`, `testing.in` → `test`/`test-base`.
+  - **Role-split** — one file must become several groups for the version matrix: `testing.in`'s `django` → `test`/`django42` (see Django rules below).
+  - **`-r`-only** — the file has no direct packages (only `-r` includes); it collapses into the canonical aggregate (`dev`) rather than a redundant alias group.
+  - **Documented drop** — the file's tool is deliberately removed (e.g. `pip_tools.in` → pip-compile is gone); no group, and the file appears under deleted `requirements/`.
+- **Non-canonical name WITH direct packages AND a real consumer → create a same-named group.** If a bespoke `.in` (e.g. `sandbox.in`) holds direct packages and something installs them (a Dockerfile, an entrypoint, a separate sandbox venv), give it a same-named group and have the consumer install that group — do NOT scatter its packages into unrelated groups and then hardcode them at the consumer. This is the most-missed case: a `sandbox`-style group that must exist because a Dockerfile needs it.
 - `-r other.in` in any `.in` file → `{include-group = "other"}` in the corresponding group
 - If `ci.in` does not exist on master, create a `ci` group with `tox` and `tox-uv` as the only entries
 - If only one Django version is tested, include `Django>=X.Y,<X+1.0` directly in `test` — no `test-base` split needed
 - If multiple Django versions are tested, split into `test-base` (non-Django packages) + one group per Django version; `test` should be the highest-supported version
+
+**Consuming a group outside the project venv** (Dockerfile, entrypoint, or any non-`.venv` virtualenv that used to `pip install -r requirements/X.txt`): install the matching group with
+`uv pip install --python <path-to-venv>/bin/python --no-cache-dir --group <name>`
+rather than re-listing packages by hand. This keeps the consumer in sync with `pyproject.toml`/`uv.lock` and is the general form of the `sandbox`/`ci`-group Dockerfile pattern.
 
 **Declare uv conflicts** when multiple Django-version groups exist:
 
@@ -839,6 +849,7 @@ jobs:
 
 **Parity rules:**
 - **Do not add `fail-fast` to the matrix `strategy:` block.** `fail-fast` defaults to `true`, so setting it explicitly (`true` *or* `false`) is a needless deviation. Omit the key entirely and keep the `strategy:` block in parity with master — if master had no `fail-fast`, the modernized workflow must have none either.
+- **Do not add `fetch-depth: 0` to the CI checkout step.** The reference CI workflows (`openedx/sample-plugin`, `openedx/xblocks-extra`) use the default shallow checkout even with the same `setuptools-scm` + `fallback_version` setup. A full-history checkout only slows CI — `setuptools-scm` falls back to `fallback_version` for the throwaway build artifact (nothing asserts a specific `__version__`), and the real release uses `SETUPTOOLS_SCM_PRETEND_VERSION`. Leave `actions/checkout` at its default depth in `ci.yml`. (`release.yml` is exempt — `python-semantic-release` needs full history.)
 - SHA-pin ALL actions — no mutable version tags (e.g. `@v4`)
 - **Never downgrade a SHA** — for any action already on master, use its exact SHA or a newer one. Running with an older SHA than master is a regression.
 - **Use `py` for the bare Python test env** (no Django suffix). The `python-version` matrix entry drives the interpreter. With Django matrix: use `django42`, `django52` etc.
@@ -861,13 +872,13 @@ jobs:
 - Add `[tool.semantic_release]` config to `pyproject.toml`
 - Add `release.yml` workflow that runs CI then publishes to PyPI via OIDC
 - Add `commitlint.yml` workflow to enforce conventional commits on PRs
-- Flag that PyPI trusted publisher (OIDC) must be configured before merging
 
 #### 3.1 — Add semantic-release config to pyproject.toml
 
 ```toml
 [tool.semantic_release]
 build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION python -m build"
+changelog = false  # repo has its own CHANGELOG file; PSR must not overwrite it
 
 # Do NOT add a [tool.semantic_release.changelog] section. We no longer manage a
 # changelog file with PSR. Release notes live only on the GitHub Release page
@@ -877,6 +888,11 @@ build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSIO
 # Omit entirely for 1.x+ repos
 allow_zero_version = true
 major_on_zero = false
+
+# Do NOT add [tool.semantic_release.commit_parser_options]. Per
+# public-engineering#506, other libraries use PSR DEFAULT release tags
+# (minor: feat; patch: fix, perf). backend-plugin-sample overrides these as a
+# deliberate example-repo exception — #506 explicitly says not to copy it.
 ```
 
 Check: `git tag --sort=version:refname | tail -1`. If it starts with `0.`, add the guard. If `1.` or higher, omit it.
@@ -907,7 +923,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@SHA_VERSION # TODO: Update master version or latest version
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref_name }}
 
@@ -916,21 +932,43 @@ jobs:
 
       - name: Run Semantic Release
         id: release
-        uses: python-semantic-release/python-semantic-release@v<PSR_VERSION>
+        uses: python-semantic-release/python-semantic-release@9a026e9303981c866c3425723009becb2437c757 # v10.6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           git_committer_name: "github-actions"
           git_committer_email: "actions@users.noreply.github.com"
+          # Commit, tag, push and build, but don't create the GitHub release.
+          # We create it ourselves in the next step so that the distributions
+          # are attached before the release is published. See that step for why.
+          vcs_release: "false"
+          # Release notes live only on the GitHub Release page; no changelog file.
+          changelog: "false"
 
-      - name: Upload to GitHub Release Assets
-        uses: python-semantic-release/publish-action@v<PSR_VERSION>
+      # The openedx org has immutable releases enabled, which freezes a release's
+      # assets the moment it is published, so assets cannot be attached
+      # afterwards. `gh release create` handles this by creating the release as a
+      # draft, uploading the assets, and only then publishing it:
+      # https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases
+      - name: Create GitHub Release with Assets
         if: steps.release.outputs.released == 'true'
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.release.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reuse the release notes python-semantic-release generated for us.
+          RELEASE_NOTES: ${{ steps.release.outputs.release_notes }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          # Write the release notes to a file so arbitrary content (backticks,
+          # $(...), quotes) passes through unexpanded.
+          printf '%s' "$RELEASE_NOTES" > "$RUNNER_TEMP/release_notes.md"
+          # Create the release as a draft, attach the dists, then publish.
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/release_notes.md" \
+            dist/*
 
       - name: Upload distribution artifacts
-        uses: actions/upload-artifact@SHA_VERSION # TODO: Update master version or latest version
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.release.outputs.released == 'true'
         with:
           name: distribution-artifacts
@@ -952,34 +990,40 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@SHA_VERSION # TODO: Update master version or latest version
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: distribution-artifacts
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@<VERIFIED_COMMIT_SHA> # v<VERSION>
-        # No user/password — OIDC trusted publisher. Configure on PyPI before merging.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        # No user/password — OIDC trusted publisher (already configured on the repo's PyPI project).
 ```
 
-Get the current verified **commit** SHA for `pypa/gh-action-pypi-publish` (must be a real commit SHA, not a tag-object SHA):
+The SHAs above are the current latest at the time of writing (`checkout` v7.0.1, `upload-artifact` v7.0.1, `download-artifact` v8.0.1, `python-semantic-release` v10.6.2, `gh-action-pypi-publish` v1.14.2). **Re-verify each against the latest release before use** — pin to a real **commit** SHA, not the annotated-tag object SHA:
 ```bash
-# Get the latest release tag
-gh api repos/pypa/gh-action-pypi-publish/releases/latest --jq '.tag_name'
-# Then resolve to a real commit SHA (not the tag object SHA):
-gh api repos/pypa/gh-action-pypi-publish/commits/<TAG> --jq '.sha'
-# Verify it resolves (returns 200, not 422):
-gh api repos/pypa/gh-action-pypi-publish/commits/<SHA> --jq '.sha'
+for repo in actions/checkout actions/upload-artifact actions/download-artifact \
+            python-semantic-release/python-semantic-release pypa/gh-action-pypi-publish; do
+  tag=$(gh api repos/$repo/releases/latest --jq '.tag_name')
+  # Resolve the tag to a commit SHA (dereferences annotated tags to the commit, not the tag object):
+  sha=$(gh api repos/$repo/commits/$tag --jq '.sha')
+  # Verify it resolves (returns the SHA, not a 422):
+  gh api repos/$repo/commits/$sha --jq '.sha' >/dev/null && printf '%-50s %-9s %s\n' "$repo" "$tag" "$sha"
+done
 ```
 
 **SHA pinning rules for release.yml:**
-- `pypa/gh-action-pypi-publish` — **must use a verified commit SHA** (not a floating tag). A floating `@release/v1` branch on this action caused a real production incident; SHA-pinning is non-negotiable here. Verify the SHA resolves via `gh api .../commits/<sha>` before using it.
-- `python-semantic-release/python-semantic-release` and `python-semantic-release/publish-action` — use **floating version tags** (e.g. `@v10.6.1`), not SHA pins. These actions run only on push to default branch (never in PR CI), so a supply-chain SHA pin adds friction without meaningful protection. `openedx/XBlock`'s reference implementation uses floating tags for PSR actions.
-- All other actions (e.g. `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`) — **SHA-pin as usual**.
+- **Every action is SHA-pinned to a verified commit SHA** with the version in a trailing comment (e.g. `# v10.6.2`) — matching the `openedx/sample-plugin` reference standard. Pin the **commit** SHA, not the annotated-tag object SHA (they differ; the `commits/<tag>` lookup above returns the correct one).
+- `pypa/gh-action-pypi-publish` — SHA-pinning is **non-negotiable**: a floating `@release/v1` branch on this action once caused a real production incident.
+- `python-semantic-release/python-semantic-release` — **SHA-pin it** (with `# vX.Y.Z` comment), the same as `sample-plugin`. Even though it only runs on push to the default branch, pin it for consistency with the standard and to keep every `uses:` in the file verifiable.
+- The GitHub Release is created by a `gh release create` shell step (not `python-semantic-release/publish-action`), so there is no action SHA to pin for it. This is required by the openedx org's **immutable releases** — assets must be attached to a draft before it is published. Keep `vcs_release: "false"` on the PSR step so it does not publish the release itself.
+- `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact` — SHA-pin as usual.
 
 If master had a legacy `pypi-publish.yml` or similar workflow: `git rm .github/workflows/pypi-publish.yml`.
 
 **Never delete cross-repo or release-automation workflows unless they directly depend on deleted functionality.** Workflows triggered on tag push or that call external services read from `$GITHUB_REF` or API calls — they are unaffected by this migration. Only delete a workflow if it explicitly reads/writes the hardcoded `__version__`, invokes pip-compile, or references a deleted file (e.g. `requirements/base.in`). When in doubt, keep it. Document every deleted workflow in the PR description with the precise reason.
+
+**`upgrade-python-requirements.yml` — always keep this workflow.** Even though it previously used pip-compile under the hood, the shared `openedx/.github` workflow it calls installs uv and then runs plain `make upgrade`, which on the modernized branch is the uv path (`uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml && uv lock --upgrade`). The `ADD_PATHS="requirements"` it sets only feeds the `peter-evans/create-pull-request` step, which is gated `if: env.is_fork == 'true'`; non-fork repos go through `pull_request_creator`, which commits whatever `make upgrade` changed with no path filter — and `edx-repo-tools` already reads `uv.lock`. Keeping this workflow is what **restores** weekly automated dependency upgrades (via `uv.lock` diffs) rather than just preserving them. If the workflow was failing before the migration on `make upgrade` (e.g. `pip-tools` against current pip), confirm it now passes on the modernized branch before considering removal.
 
 #### 3.3 — Add commitlint.yml
 
@@ -1430,6 +1474,11 @@ if not master_ipd and setup_py and re.search(r'include_package_data\s*=\s*True',
 if master_ipd and master_ipd.lower() in ("true","1","yes") and not tool.get("setuptools",{}).get("include-package-data"):
     add(INFO, "[tool.setuptools] include-package-data = true not set (master had include_package_data=True)")
 
+EXPECTED_AUTHORS = [{"name": "Open edX Project", "email": "oscm@openedx.org"}]
+pr_authors = project.get("authors", [])
+if pr_authors != EXPECTED_AUTHORS:
+    add(FAIL, f"[project].authors must be exactly {EXPECTED_AUTHORS!r} — got {pr_authors!r}")
+
 fails = [f for f in findings if f[0] == FAIL]
 warns = [f for f in findings if f[0] == WARN]
 infos = [f for f in findings if f[0] == INFO]
@@ -1710,28 +1759,6 @@ else:
     print("OK: no source-tracing comments in [dependency-groups]")
 PYEOF
 
-# --- Check 17: pragma: no cover on PackageNotFoundError except branch ---
-echo "--- Check 17: pragma: no cover on PackageNotFoundError ---"
-python3 << 'PYEOF'
-import re, glob
-
-failures = []
-for py_file in glob.glob('src/**/*.py', recursive=True) + glob.glob('*.py') + glob.glob('[!.]*/**/__init__.py', recursive=True):
-    try:
-        lines = open(py_file).readlines()
-    except Exception:
-        continue
-    for i, line in enumerate(lines):
-        if 'except PackageNotFoundError' in line and '# pragma: no cover' not in line:
-            failures.append(f"{py_file}:{i+1}: missing '# pragma: no cover' on except PackageNotFoundError branch")
-
-if failures:
-    for f in failures:
-        print(f"FAIL: {f}")
-else:
-    print("OK: all PackageNotFoundError except branches have pragma: no cover")
-PYEOF
-
 # --- Check 18: no uv tool install tox in Makefile requirements target ---
 echo "--- Check 18: no uv tool install tox in Makefile ---"
 python3 << 'PYEOF'
@@ -1848,6 +1875,208 @@ else:
     print("OK: no manual .venv/bin GITHUB_PATH echoes in CI workflows")
 PYEOF
 
+# --- Check 22: no unnecessary fetch-depth: 0 in CI checkout ---
+echo "--- Check 22: no unnecessary fetch-depth: 0 in CI checkout ---"
+python3 << 'PYEOF'
+import re, glob, os
+
+# Only the CI test workflow — release.yml may legitimately need full history for python-semantic-release.
+CI_WORKFLOWS = [p for p in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml')
+                if re.search(r'(ci|python-tests)\.ya?ml$', os.path.basename(p))]
+
+failures = []
+for wf in CI_WORKFLOWS:
+    try:
+        content = open(wf).read()
+    except FileNotFoundError:
+        continue
+    for i, line in enumerate(content.splitlines(), 1):
+        if re.search(r'^\s*fetch-depth\s*:\s*0\s*(#.*)?$', line):
+            failures.append(f"{wf}:{i}: sets 'fetch-depth: 0' — unnecessary full-history checkout")
+
+if not CI_WORKFLOWS:
+    print("SKIP: no ci.yml / python-tests.yml found")
+elif failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    print("  Remove 'fetch-depth: 0' from the CI checkout — reference repos (sample-plugin, xblocks-extra) "
+          "omit it with the same setuptools-scm + fallback_version setup; it only slows CI. release.yml is exempt.")
+else:
+    print("OK: CI checkout uses default shallow depth (no unnecessary fetch-depth: 0)")
+PYEOF
+
+# --- Check 25: no dead [tool.coverage.run] in pyproject.toml for non-Python-test repos ---
+echo "--- Check 25: no dead [tool.coverage.run] block ---"
+python3 << 'PYEOF'
+import glob, os, tomllib
+
+# A repo that has no Python test files and no coverage invocation in Makefile/tox
+# does not run Python coverage. Porting .coveragerc → [tool.coverage.run] in
+# pyproject.toml is dead config and must be dropped instead.
+# Signal: .shellspec present (shellspec+kcov repo) OR no test_*.py files anywhere.
+
+try:
+    with open('pyproject.toml', 'rb') as f:
+        data = tomllib.load(f)
+except FileNotFoundError:
+    print("SKIP: no pyproject.toml found")
+    raise SystemExit(0)
+
+has_coverage_block = 'coverage' in data.get('tool', {})
+if not has_coverage_block:
+    print("OK: no [tool.coverage.run] block in pyproject.toml")
+    raise SystemExit(0)
+
+# Check signals that Python coverage is not used
+has_shellspec = os.path.exists('.shellspec')
+python_test_files = glob.glob('tests/test_*.py') + glob.glob('**/test_*.py', recursive=True)
+python_test_files = [f for f in python_test_files if '.tox' not in f and '.venv' not in f]
+
+makefile_uses_coverage = False
+try:
+    makefile = open('Makefile').read()
+    makefile_uses_coverage = 'coverage' in makefile and 'pytest' in makefile
+except FileNotFoundError:
+    pass
+
+if has_shellspec and not python_test_files:
+    print("FAIL: [tool.coverage.run] found in pyproject.toml but this repo uses shellspec+kcov "
+          "(not Python coverage) — .shellspec exists and there are no test_*.py files. "
+          "Drop the [tool.coverage.run] block instead of porting it from .coveragerc.")
+elif not python_test_files and not makefile_uses_coverage:
+    print("FAIL: [tool.coverage.run] found in pyproject.toml but no Python test files exist "
+          "and Makefile does not invoke coverage. This block is dead config — drop it.")
+else:
+    print("OK: [tool.coverage.run] present and Python test infrastructure exists")
+PYEOF
+
+# --- Check 24: Makefile test/lint targets do not use uv run --group inside tox ---
+echo "--- Check 24: Makefile test/lint targets don't re-sync env via uv run --group ---"
+python3 << 'PYEOF'
+import re
+
+# When tox calls a Makefile target (e.g. make test), `uv run --group <name>` inside
+# that target re-syncs the environment to the named group — overriding the dependency
+# group tox already installed. This means both django42 and django52 envs end up
+# running the same Django version (whichever the group pins), so 4.2 is never tested.
+# Makefile targets invoked by tox must use plain `python`/`pytest`/tool invocations;
+# tox owns the venv at that point.
+
+try:
+    content = open('Makefile').read()
+except FileNotFoundError:
+    print("SKIP: no Makefile found")
+    raise SystemExit(0)
+
+# Targets tox typically calls — anything with `make <target>` in tox.ini
+TOX_CALLED_TARGETS = {'test', 'lint', 'quality', 'test-with-coverage', 'coverage'}
+
+failures = []
+current_target = None
+for line in content.splitlines():
+    m = re.match(r'^([a-zA-Z_-]+)\s*:', line)
+    if m:
+        current_target = m.group(1)
+    if current_target in TOX_CALLED_TARGETS:
+        if re.search(r'uv\s+run\s+--group\b', line):
+            failures.append(f"  make {current_target}: {line.strip()}")
+
+if failures:
+    print("FAIL: Makefile target(s) called by tox use 'uv run --group', which re-syncs the")
+    print("  environment and overrides the dependency group tox installed (e.g. django42 ends")
+    print("  up running the version pinned in 'test', not 4.2). Use plain tool invocations")
+    print("  instead — tox manages the venv, the Makefile just runs commands inside it:")
+    print("    test:  uv run python -Wd -m pytest tests/")
+    print("    lint:  uv run flake8 src tests")
+    for f in failures:
+        print(f)
+else:
+    print("OK: tox-called Makefile targets do not re-sync the environment via uv run --group")
+PYEOF
+
+# --- Check 23: every master requirement is covered (filename-agnostic) ---
+echo "--- Check 23: requirements coverage ---"
+python3 << 'PYEOF'
+import re, subprocess, tomllib
+
+def normalize(name):
+    name = re.sub(r'\[.*?\]', '', name).strip()
+    return name.lower().replace('_', '-').replace('.', '-')
+
+def parse_in_file(content):
+    pkgs = set()
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', '-r', '-c', '-e')):
+            continue
+        if 'github.com' in line or line.startswith('git+'):
+            m = re.search(r'egg=([^&\s]+)', line)
+            if m:
+                pkgs.add(normalize(m.group(1))); continue
+        name = re.split(r'[><=!~\s;@\[]', line)[0]
+        if name:
+            pkgs.add(normalize(name))
+    return pkgs
+
+base = next((b for b in ('main','master')
+             if subprocess.run(['git','show-ref','--verify','--quiet',f'refs/heads/{b}'],
+                               capture_output=True).returncode == 0), None)
+if not base:
+    print("SKIP: no local main/master branch"); raise SystemExit(0)
+
+# Discover the repo's ACTUAL .in files — do NOT assume canonical names. This is the
+# gap the hardcoded Test 160 list left open: legacy repos (sandbox.in/testing.in/
+# tox.in) would otherwise be validated against nonexistent files and pass vacuously.
+ls = subprocess.run(['git', 'ls-tree', '--name-only', f'{base}:requirements'],
+                    capture_output=True, text=True)
+in_files = [f for f in ls.stdout.split() if f.endswith('.in')]
+if not in_files:
+    print("SKIP: no requirements/*.in files on base — nothing to compare"); raise SystemExit(0)
+
+master_pkgs = set()
+for f in in_files:
+    r = subprocess.run(['git', 'show', f'{base}:requirements/{f}'], capture_output=True, text=True)
+    if r.returncode == 0:
+        master_pkgs |= parse_in_file(r.stdout)
+
+# Tools legitimately removed by the migration (replaced by uv's own machinery).
+REPLACED = {'pip-tools'}
+
+def bare(dep):
+    # Strip version specifiers/extras so "Django>=5.2,<6.0" matches master's bare "django".
+    return normalize(re.split(r'[><=!~\s;@\[]', dep)[0])
+
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+pr_pkgs = {bare(d) for d in data.get('project', {}).get('dependencies', [])}
+for grp in data.get('dependency-groups', {}).values():
+    for d in grp:
+        if isinstance(d, str):
+            pr_pkgs.add(bare(d))
+
+# Packages still resolvable transitively via uv.lock are covered even if the explicit
+# declaration moved — losing the declaration is a WARN, not a FAIL.
+try:
+    with open('uv.lock', 'rb') as f:
+        LOCKED = {normalize(p.get('name','')) for p in tomllib.load(f).get('package', [])}
+except (FileNotFoundError, tomllib.TOMLDecodeError):
+    LOCKED = set()
+
+missing = master_pkgs - pr_pkgs - REPLACED
+gone       = sorted(p for p in missing if p not in LOCKED)
+transitive = sorted(p for p in missing if p in LOCKED)
+
+print(f"  Discovered {base} .in files: {sorted(in_files)}")
+for p in transitive:
+    print(f"WARN: {p} — in a {base} .in file, not declared in pyproject.toml but present in uv.lock (re-declare or confirm intentional)")
+if gone:
+    for p in gone:
+        print(f"FAIL: {p} — in a {base} .in file but absent from pyproject.toml AND uv.lock")
+    raise SystemExit(1)
+else:
+    print(f"OK: all {len(master_pkgs)} master requirement(s) covered by pyproject.toml / uv.lock")
+PYEOF
+
 echo "======= END PRE-PR VALIDATION ======="
 ```
 
@@ -1868,9 +2097,11 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `tox.ini` uses `tox-uv>=1`, `uv-venv-lock-runner`, tox envs call `make` targets
 - [ ] Makefile `upgrade` → `edx_lint write_uv_constraints` + `uv lock --upgrade`
 - [ ] Makefile `requirements` → `uv sync --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
+- [ ] Makefile `test`/`lint` targets invoked by tox use plain `python`/tool invocations — **no `uv run --group`** (that re-syncs the venv and overrides the Django/package version tox installed)
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
 - [ ] CI uses `astral-sh/setup-uv`, `uv sync --group ci`, `uv run tox`, named `ci.yml`
 - [ ] CI does **not** set `fail-fast` (it defaults to `true`); `strategy:` block in parity with master
+- [ ] CI checkout does **not** set `fetch-depth: 0` (unnecessary full-history checkout that only slows CI; reference repos omit it — `release.yml` exempt)
 - [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env; Codecov `if:` uses compound condition (`matrix.toxenv == 'py' && matrix.python-version == '3.12'`)
 - [ ] Codecov `if:` condition references the exact toxenv name used in the matrix
 - [ ] All actions SHA-pinned; no SHA is older than what master used
@@ -1879,11 +2110,11 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `make lint` exits 0
 - [ ] `make test` exits 0
 - [ ] `uv lock --check` exits 0
-- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope)
+- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope, Check 23: requirements coverage — every master `requirements/*.in` package survives in pyproject.toml/uv.lock, filename-agnostic, Check 24: tox-called Makefile targets do not use `uv run --group`, Check 25: no dead `[tool.coverage.run]` block in non-Python-test repos)
 - [ ] Coverage thresholds match master (no invented `fail_under`)
 - [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
-- [ ] `__version__` in package `__init__.py` uses `importlib.metadata` pattern with `# pragma: no cover` on the `except PackageNotFoundError` line — never remove `__version__` entirely
-- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x; `## Important Notes` flags OIDC trusted publisher config required
+- [ ] `__version__` in package `__init__.py` uses `importlib.metadata.version("<pkg>")` — never remove `__version__` entirely
+- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x
 - [ ] **Non-PyPI repos:** static `version = "x.y.z"` in `[project]`; no `setuptools-scm`; `## Important Notes` documents why `src/` layout and `release.yml` were not added
 - [ ] `src/` layout decision documented in `## Important Notes` if not adopted
 
@@ -1988,7 +2219,7 @@ Use the template in [PR description format](#pr-description-format). Apply these
 - **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed. For the `requirements` target, the entry must describe `uv sync --group dev` — if the `=== uv tool install tox ===` check in Step 1 flagged a hit, do NOT document it as correct in the table; flag it as a bug to fix before the PR is merged.
 - **`## Python X.Y dropped` section:** present if and only if `requires-python` changed vs master. Omit otherwise.
 - **Versioning section:** write the `[Static]` paragraph if no `setuptools-scm` in `pyproject.toml`; write the `[Dynamic]` paragraph if `setuptools-scm` is present. Write exactly one, never both.
-- **`## Important Notes` section:** include when there is something critical to flag. Always include when `release.yml: PRESENT` (flag that OIDC trusted publisher must be configured on PyPI before merge). Also use for: omitted items (`release.yml` not added because no PyPI workflow existed; `src/` layout not adopted because repo doesn't publish to PyPI), unusual constraint pins, branch-protection check names reviewers must verify, or any other non-obvious decision.
+- **`## Important Notes` section:** include when there is something critical to flag. Use for: omitted items (`release.yml` not added because no PyPI workflow existed; `src/` layout not adopted because repo doesn't publish to PyPI), unusual constraint pins, branch-protection check names reviewers must verify, or any other non-obvious decision. (PyPI trusted publisher / OIDC is already configured on all repos — do not flag it as a merge blocker.)
 
 ---
 
@@ -2045,7 +2276,7 @@ OR
 [Dynamic] `setuptools-scm` with `dynamic = ["version"]` — master had a PyPI publish workflow; `python-semantic-release` controls the version string at release time via git tags.
 
 ## Important Notes
-Add this section only if there is something critical to flag (e.g. OIDC trusted publisher must be configured before merge, a branch-protection check name that must match, a retained workflow that reviewers should scrutinise). Omit entirely if nothing warrants it.
+Add this section only if there is something critical to flag (e.g. a branch-protection check name that must match, a retained workflow that reviewers should scrutinise). Omit entirely if nothing warrants it.
 
 ## Testing Notes
 This PR has not been manually tested against the repo's own features. Testing relied on CI checks and local agent tooling (`make requirements`, `make lint`, `make test`, `python -m build`). Repo-owner is encouraged to run the repo's feature tests before merging.
@@ -2079,7 +2310,7 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-10390), in order, Test 10 through Test 390.
+Run **all** tests from the [Test suite](#test-suite--tests-10390), in order, Test 10 through Test 395.
 
 **Test 10 is a hard gate.** If ruff is present, Test 10 fails: **stop running the remaining tests**, report only Test 10's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 10 halts — record them as `⏭️ Skipped (halted at Test 10 — ruff present)`.
 
@@ -2126,6 +2357,7 @@ Template:
 | Test#370 | No source-tracing comments in dependency-groups | ✅ Pass | |
 | Test#380 | Required tox environments present | ✅ Pass | py, quality, docs all present |
 | Test#390 | No manual venv GITHUB_PATH echo in CI | ✅ Pass | |
+| Test#395 | No unnecessary fetch-depth: 0 in CI checkout | ✅ Pass | CI uses default shallow checkout |
 
 ## Failure details
 
@@ -2147,7 +2379,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 |---|---|---|
 | Entry gate (run first) | 10 | Ruff absent everywhere |
 | Python version | 260 | Python < 3.12 removed from tox, CI, classifiers |
-| Package structure and files | 90, 130, 220, 310 | Stale files deleted; `__version__` removed; src/ layout correct; no empty codecov.yml introduced |
+| Package structure and files | 90, 130, 220, 310 | Stale files deleted; `__version__` uses importlib.metadata (no hardcoded string); src/ layout correct; no empty codecov.yml introduced |
 | Package build | 30, 70, 80 | Build output complete; package imports; setuptools-scm runtime (PyPI) |
 | Dependency management | 40, 50, 160, 170, 270, 340 | Lockfile in sync; groups resolve; all packages migrated; constraints; static deps; `-r` refs use include-group |
 | Migration parity | 155 | Every field from master's setup.py/setup.cfg (metadata, entry points, tool configs) present in pyproject.toml |
@@ -2155,7 +2387,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
 | Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
 | Makefile | 20, 140, 350 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox) |
-| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390 | YAML valid; branch protection preserved; CI-first + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo |
+| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390, 395 | YAML valid; branch protection preserved; CI-first + immutable-safe `gh release create` (`vcs_release: "false"`, no `publish-action`) + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo; no unnecessary `fetch-depth: 0` in CI checkout |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
@@ -2412,17 +2644,15 @@ grep -rn '__version__' --include='*.py' . | grep -v '\.tox' | grep -v '/test'
 
 **Pass criteria — both must hold:**
 1. No hardcoded `__version__ = "x.y.z"` string remains in package source.
-2. The `importlib.metadata` pattern is present in the package `__init__.py`, with `# pragma: no cover` on the `except PackageNotFoundError` line:
+2. `importlib.metadata.version("<package-name>")` is used in the package `__init__.py` (with or without a `try/except PackageNotFoundError` wrapper — both are acceptable):
 
 ```python
-from importlib.metadata import PackageNotFoundError, version
-try:
-    __version__ = version("<package-name>")
-except PackageNotFoundError:  # pragma: no cover
-    __version__ = "unknown"
+from importlib.metadata import version
+
+__version__ = version("<package-name>")
 ```
 
-`__version__` should always be kept as a norm — do not remove it entirely. The `# pragma: no cover` is required because the except branch is unreachable during tests (the package is always installed) and will cause codecov failures without it.
+`__version__` should always be kept as a norm — do not remove it entirely.
 
 
 ### Test 90 — No stale files on disk
@@ -2476,22 +2706,21 @@ Scan only workflow files that were **added or modified by this PR** for GitHub A
 git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml'
 ```
 
-For each changed workflow file, check for un-pinned references — **excluding org-internal reusable workflow calls and PSR actions** (which intentionally use floating version tags):
+For each changed workflow file, check for un-pinned references — **excluding only org-internal reusable workflow calls** (which use floating version tags). Every third-party action, including `python-semantic-release`, must be SHA-pinned:
 
 ```bash
 git diff master...HEAD --name-only -- '.github/workflows/*.yml' '.github/workflows/*.yaml' \
   | xargs grep -E 'uses:\s+\S+@' \
   | grep -v '@[0-9a-f]\{40\}' \
   | grep -v '^#' \
-  | grep -v 'uses:\s\+openedx/\.github/' \
-  | grep -v 'python-semantic-release/'
+  | grep -v 'uses:\s\+openedx/\.github/'
 ```
 
-**Exemptions from SHA pinning:**
-- `python-semantic-release/python-semantic-release` and `python-semantic-release/publish-action` — these run only on push to the default branch (never in PR CI), so floating version tags (e.g. `@v10.6.1`) are correct and intentional. The `openedx/XBlock` reference implementation uses this pattern.
+**SHA pinning expectations:**
+- `python-semantic-release/python-semantic-release` — **SHA-pin it** (with a `# vX.Y.Z` comment), matching the `openedx/sample-plugin` standard. Even though it runs only on push to the default branch, it is pinned for consistency so every third-party `uses:` in the file is verifiable. (The GitHub Release itself is created by a `gh release create` shell step, which has no action reference to pin.)
 - `pypa/gh-action-pypi-publish` — **must be SHA-pinned** with a verified commit SHA (not a tag-object SHA). A floating ref on this action caused a real production incident; verify the SHA resolves via `gh api repos/pypa/gh-action-pypi-publish/commits/<sha>` before accepting.
 
-**Pass:** No un-pinned third-party action references in any workflow file added or modified by the PR (PSR actions with floating version tags are exempt; `gh-action-pypi-publish` must be SHA-pinned).
+**Pass:** No un-pinned third-party action references in any workflow file added or modified by the PR — every third-party action, including `python-semantic-release` and `gh-action-pypi-publish`, is SHA-pinned with a `# vX.Y.Z` comment. Only org-internal reusable workflow calls (`openedx/.github/...`) may use a floating ref.
 
 ### Test 120 — Logic change audit (informational only)
 
@@ -2740,6 +2969,14 @@ if master_ipd and master_ipd.lower() in ("true", "1", "yes"):
     if not tool.get("setuptools", {}).get("include-package-data"):
         add(INFO, "[tool.setuptools] include-package-data = true not set (master had include_package_data=True)")
 
+# ── 13. authors ───────────────────────────────────────────────────────────────
+EXPECTED_AUTHORS = [{"name": "Open edX Project", "email": "oscm@openedx.org"}]
+pr_authors = project.get("authors", [])
+if pr_authors != EXPECTED_AUTHORS:
+    add(FAIL, f"[project].authors must be exactly {EXPECTED_AUTHORS!r} — got {pr_authors!r}")
+else:
+    print(f"  ok  authors = {pr_authors!r}")
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 print()
 fails = [f for f in findings if f[0] == FAIL]
@@ -2772,6 +3009,13 @@ REPLACED_BY_MIGRATION = {
     'pip-tools',
 }
 
+# Build/publish bootstrap tools that uv subsumes or that are irrelevant for non-PyPI
+# services. Missing these is not a hard failure — emit a WARN so the author can confirm
+# the drop was intentional rather than accidental.
+WARN_IF_MISSING = {
+    'pip', 'wheel', 'setuptools', 'twine',
+}
+
 # Packages legitimately added to specific groups by this migration that were not
 # in the original .in files. Keyed by group name → set of normalized package names.
 # tox-uv: the migration template always adds tox-uv to the ci group even when
@@ -2781,6 +3025,9 @@ ADDED_BY_MIGRATION = {
 }
 
 def normalize(name):
+    # Strip version specifiers/markers first so a PR entry like "Django>=5.2,<6.0"
+    # matches master's bare "django" (else it reads as a spurious missing package).
+    name = re.split(r'[><=!~\s;@]', name)[0]
     name = re.sub(r'\[.*?\]', '', name).strip()
     return name.lower().replace('_', '-').replace('.', '-')
 
@@ -2824,7 +3071,17 @@ with open('pyproject.toml', 'rb') as f:
 
 # ── Step 1 — Overall parity: no package dropped or gained across all .in files ──
 
-in_files = ['base.in', 'test.in', 'dev.in', 'doc.in']
+# Discover the repo's ACTUAL .in files instead of assuming canonical cookiecutter
+# names — legacy repos use bespoke names (e.g. sandbox.in, testing.in, tox.in). A
+# hardcoded ['base.in','test.in',...] list reads nothing for those repos and passes
+# vacuously, hiding real drift. Glob what master actually has.
+ls = subprocess.run(['git', 'ls-tree', '--name-only', 'master:requirements'],
+                    capture_output=True, text=True)
+in_files = [f for f in ls.stdout.split() if f.endswith('.in')]
+if not in_files:
+    print("SKIP: no requirements/*.in files on master — nothing to compare")
+    raise SystemExit(0)
+print(f"Discovered master .in files: {sorted(in_files)}")
 master_pkgs = set()
 for f in in_files:
     r = subprocess.run(['git', 'show', f'master:requirements/{f}'], capture_output=True, text=True)
@@ -2842,10 +3099,15 @@ for group_deps in data.get('dependency-groups', {}).values():
 missing = master_pkgs - pr_pkgs - REPLACED_BY_MIGRATION
 added   = pr_pkgs - master_pkgs
 
-# Split missing into hard failures (gone from the resolved env too) and soft warnings
+# Packages in WARN_IF_MISSING are treated as warnings regardless of uv.lock presence —
+# uv subsumes pip/setuptools/wheel, and twine is irrelevant for non-PyPI services.
+missing_warn_only  = {p for p in missing if p in WARN_IF_MISSING}
+missing_real       = missing - missing_warn_only
+
+# Split real missing into hard failures (gone from the resolved env too) and soft warnings
 # (still transitively present in uv.lock — declaration lost but environment intact).
-missing_gone       = {p for p in missing if p not in LOCKED}
-missing_transitive = {p for p in missing if p in LOCKED}
+missing_gone       = {p for p in missing_real if p not in LOCKED}
+missing_transitive = {p for p in missing_real if p in LOCKED}
 
 print("Step 1 — Overall parity:")
 print("  MISSING & GONE (in master .in files, not in pyproject.toml, not in uv.lock):")
@@ -2856,6 +3118,10 @@ print("  MISSING but TRANSITIVELY AVAILABLE (dropped explicit declaration, still
 for p in sorted(missing_transitive): print(f"    WARN: {p}  — re-declare explicitly for reproducibility, or confirm the drop is intentional")
 if not missing_transitive: print("    (none)")
 
+print("  MISSING build/publish bootstrap tools (uv subsumes these; WARN only):")
+for p in sorted(missing_warn_only): print(f"    WARN: {p}  — uv provides pip/setuptools/wheel implicitly; twine is only needed for PyPI publishing. Confirm the drop is intentional.")
+if not missing_warn_only: print("    (none)")
+
 print("  ADDED in PR (not in any master .in file):")
 for p in sorted(added): print(f"    ADDED: {p}")
 if not added: print("    (none)")
@@ -2864,16 +3130,51 @@ print(f"\n  Master total: {len(master_pkgs)} | PR total: {len(pr_pkgs)}")
 if missing_gone:
     raise SystemExit(f"\nFAIL: {len(missing_gone)} package(s) missing from pyproject.toml AND absent from uv.lock")
 
-# ── Step 2 — Group-level exact parity: each .in file maps to its named group ──
-
-group_checks = {'dev': 'dev.in', 'test': 'test.in', 'doc': 'doc.in', 'ci': 'ci.in', 'quality': 'quality.in'}
+# ── Step 2 — Per-.in accountability (no silent skips) ──
+# Derived from the .in files actually discovered in Step 1 (not a hardcoded canonical
+# list). Two modes per file:
+#   • basename matches a group (canonical: test.in→test) → exact name-based parity.
+#   • non-canonical name (legacy: sandbox/testing/tox) → the migration reorganizes its
+#     packages, so instead of a vacuous skip we ATTRIBUTE each package to where it
+#     landed (which group / runtime) and FAIL any package left genuinely unaccounted.
+dep_groups = data.get('dependency-groups', {})
 step2_failures = []
 
-dep_groups = data.get('dependency-groups', {})
-for group_name, in_filename in group_checks.items():
+# Reverse index: normalized package name → every destination declaring it.
+pkg_dest = {}
+for dep in data.get('project', {}).get('dependencies', []):
+    if isinstance(dep, str):
+        pkg_dest.setdefault(normalize(dep.split('@')[0]), []).append('[project.dependencies]')
+for gname, gdeps in dep_groups.items():
+    for dep in gdeps:
+        if isinstance(dep, str):
+            pkg_dest.setdefault(normalize(dep.split('@')[0]), []).append(gname)
+
+for in_filename in sorted(in_files):
+    group_name = in_filename[:-3]  # strip ".in"
+    if group_name == 'base':
+        continue  # base.in → [project].dependencies, already covered by Step 1
     r = subprocess.run(['git', 'show', f'master:requirements/{in_filename}'], capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"\nStep 2 [{group_name}]: master:requirements/{in_filename} not found — skipping")
+        continue
+    if group_name not in dep_groups:
+        # Non-canonical name: no same-named group by design. Attribute every package to
+        # its destination(s); FAIL any that is unaccounted (not in a group/runtime AND
+        # not resolvable via uv.lock). This replaces the old silent skip.
+        pkgs = parse_in_file(r.stdout) - REPLACED_BY_MIGRATION
+        print(f"\nStep 2 — {in_filename} (non-canonical name; per-package attribution):")
+        if not pkgs:
+            print(f"  (no direct packages — '-r'-only or documented-drop)")
+            continue
+        for p in sorted(pkgs):
+            dests = pkg_dest.get(p)
+            if dests:
+                print(f"  ok  {p} → {dests}")
+            elif p in LOCKED:
+                print(f"  WARN: {p} — not declared in any group/runtime but present in uv.lock (re-declare or confirm intentional)")
+            else:
+                print(f"  FAIL: {p} — in master {in_filename} but UNACCOUNTED: not in any group/runtime AND not in uv.lock")
+                step2_failures.append(p)
         continue
     master_group_pkgs = parse_in_file(r.stdout) - REPLACED_BY_MIGRATION
     pr_group_pkgs = set()
@@ -2905,7 +3206,9 @@ if step2_failures:
 PYEOF
 ```
 
-**Pass:** No `FAIL:` or `EXTRA:` lines, exit code 0. `WARN:` lines (a master direct-dep dropped from explicit declaration but still resolvable in `uv.lock`) do not fail the test — surface them so the author can re-declare for reproducibility or confirm the drop was intentional.
+**Pass:** No `FAIL:` or `EXTRA:` lines, exit code 0. Step 1 confirms aggregate coverage; Step 2 accounts for **every** discovered `.in` file — either exact name-parity (canonical basename matches a group) or per-package attribution showing where each package landed (non-canonical/legacy names). `WARN:` lines do not fail the test — they surface cases where a package's explicit declaration was dropped but the environment is still intact (transitively in `uv.lock`), or where a build/publish bootstrap tool (`pip`, `wheel`, `setuptools`, `twine`) was dropped because uv subsumes it or it is irrelevant for a non-PyPI service.
+
+**Fail:** any package from a master `.in` file is unaccounted — absent from every dependency group / `[project].dependencies` **and** from `uv.lock` (Step 1 `MISSING & GONE`, or a Step 2 per-package `FAIL`), or a group has an `EXTRA` package not in its `.in` and not in the migration allowlist. Missing `pip`/`wheel`/`setuptools`/`twine` never causes a failure — only a warning.
 
 ### Test 170 — Constraints migration
 
@@ -2951,14 +3254,39 @@ else:
 
 **Pass:** `[tool.edx_lint].uv_constraints` is a TOML array; `[tool.uv].constraint-dependencies` is non-empty; all repo-specific pins from the old `constraints.txt` appear in `constraint-dependencies`; constrained packages in `uv.lock` respect the pins.
 
-### Test 180 — release.yml structure: CI first, then OIDC publish only
+### Test 180 — release.yml structure: CI first, immutable-safe release, then OIDC publish only
 
-Skip (with reason) if the repo is in the hardcoded non-PyPI list — in that case `release.yml` is not added. Otherwise verify that `release.yml` (a) runs the CI workflow first via a reusable-workflow call, and (b) publishes to PyPI using **OIDC trusted publishing only** — no token auth anywhere.
+Skip (with reason) if the repo is in the hardcoded non-PyPI list — in that case `release.yml` is not added. Otherwise verify that `release.yml` (a) runs the CI workflow first via a reusable-workflow call, (b) creates the GitHub Release in an **immutable-safe** way — PSR builds/tags but does not publish the release (`vcs_release: "false"`) and a `gh release create` step attaches the dists to a draft before publishing (never `python-semantic-release/publish-action`), and (c) publishes to PyPI using **OIDC trusted publishing only** — no token auth anywhere.
 
 ```bash
 echo "=== run_tests / run_ci job calling CI workflow ==="
 grep -n "uses:.*ci\.yml\|uses:.*python-tests\.yml" .github/workflows/release.yml \
   || echo "(none — FAIL: release.yml must call the CI workflow as a reusable workflow)"
+
+echo "=== immutable-safe release: PSR must NOT publish the release itself ==="
+grep -nE 'vcs_release:\s*"?false"?' .github/workflows/release.yml \
+  || echo "(none — FAIL: PSR step must set vcs_release: \"false\" so the release is created draft-first)"
+
+echo "=== changelog disabled: PSR must NOT write a changelog file ==="
+# Accepted in either location: pyproject.toml [tool.semantic_release] changelog = false
+# OR as an action input changelog: "false" in the workflow.
+# See: https://github.com/openedx/codejail-includes/pull/28#discussion_r4059961238
+pyproject_ok=$(grep -E '^\s*changelog\s*=\s*false' pyproject.toml 2>/dev/null | head -1)
+workflow_ok=$(grep -nE 'changelog:\s*"?false"?' .github/workflows/release.yml 2>/dev/null | head -1)
+if [ -n "$pyproject_ok" ] || [ -n "$workflow_ok" ]; then
+  echo "OK: changelog disabled (pyproject.toml: ${pyproject_ok:-not set}, workflow: ${workflow_ok:-not set})"
+else
+  echo "FAIL: changelog not disabled — add 'changelog = false' to [tool.semantic_release] in pyproject.toml; without it PSR overwrites the repo's CHANGELOG file on every release"
+fi
+
+echo "=== immutable-safe release: gh release create attaches assets before publishing ==="
+grep -n "gh release create" .github/workflows/release.yml \
+  || echo "(none — FAIL: release must be created via 'gh release create' with the dists as args)"
+
+echo "=== old immutable-UNSAFE pattern must be gone ==="
+grep -n "python-semantic-release/publish-action" .github/workflows/release.yml \
+  && echo "FAIL: publish-action attaches assets AFTER publish — breaks on immutable releases; replace with gh release create" \
+  || echo "(none — OK)"
 
 echo "=== id-token permission (must be present on publish_to_pypi) ==="
 grep -n "id-token" .github/workflows/release.yml || echo "(none — FAIL)"
@@ -2968,7 +3296,9 @@ echo "=== workflow filename ==="
 [ -f .github/workflows/release.yml ] && echo "OK: named release.yml" || echo "FAIL: release workflow is not named release.yml"
 ```
 
-**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; the PR description flags the trusted-publisher config as an out-of-band merge blocker.
+**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; the PSR step sets `vcs_release: "false"` and `changelog: "false"` and a `gh release create` step attaches `dist/*` to the release; **no** `python-semantic-release/publish-action` step remains; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; changelog disabled via `changelog = false` in `[tool.semantic_release]` (pyproject.toml) **or** `changelog: "false"` as an action input in the workflow — either location is acceptable. (PyPI trusted publisher / OIDC is already configured on all repos, so it is not a merge blocker to flag.)
+
+**Why the immutable-safe pattern is required:** the openedx org has [immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases) enabled, which freezes a release's assets the moment it is published. The old flow (PSR publishes the release, then `publish-action` uploads assets afterward) now fails with `422 Cannot upload assets to an immutable release`, and the artifact-less release aborts the job so PyPI/npm publish never runs. `gh release create <tag> ... dist/*` creates the release as a draft, uploads the assets, then publishes — the only ordering immutable releases allow. See [openedx/sample-plugin#57](https://github.com/openedx/sample-plugin/pull/57).
 
 ### Test 190 — Configuration thresholds must maintain parity with master
 
@@ -3338,6 +3668,59 @@ PYEOF
 ```
 
 **Pass:** a `tag_format`-matching tag exists for the version currently on PyPI (or PyPI is unreachable/unpublished → SKIP). **Fail:** no matching tag exists for the latest published version — surface the printed `SUGGEST-TAG` and require manually publishing that `v`-prefixed tag on the released commit before automated releases will compute the right version.
+
+### Test 247 — PSR commit-parser tags use the #506 default (no sample-plugin override)
+
+`public-engineering#506` (Step 3) states: *"The sample plugin overrides `minor_tags` because it wants to publish new minor versions on docs changes. That is not needed in our other libraries. They should use the default value unless you know for sure you need to use something different."* So the org-canonical `backend-plugin-sample` — which sets `minor_tags = ["feat", "docs"]` and `patch_tags = ["fix", "perf", "build"]` — is a **deliberate exception**, and other repos must NOT copy it. The expected state for a modernized library is **no `[tool.semantic_release.commit_parser_options]` block at all** (PSR defaults: minor=`feat`, patch=`fix`/`perf`). This test fails when the sample-plugin override has been copy-pasted in without justification.
+
+```bash
+python3 << 'PYEOF'
+import tomllib, subprocess, re
+
+# Gate: only PyPI repos use python-semantic-release for versioning/releases
+NON_PYPI_REPOS = {
+    'credentials-themes', 'mockprock', 'edx-repo-health',
+    'openedx-webhooks-data-schema', 'enterprise-catalog', 'enterprise-access',
+    'enterprise-subsidy', 'xapi-db-load', 'codejail-service',
+    'openedx-user-groups', 'cc2olx', 'pr_watcher_notifier',
+}
+remote = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                        capture_output=True, text=True).stdout.strip()
+m = re.search(r'/([^/]+?)(?:\.git)?$', remote)
+repo_name = m.group(1) if m else ''
+if repo_name in NON_PYPI_REPOS:
+    print(f"SKIP: {repo_name!r} is a non-PyPI repo — no python-semantic-release config"); raise SystemExit
+
+# The sample-plugin override that #506 says NOT to copy into other libraries
+SAMPLE_MINOR = ["feat", "docs"]
+SAMPLE_PATCH = ["fix", "perf", "build"]
+
+with open('pyproject.toml', 'rb') as f:
+    data = tomllib.load(f)
+opts = data.get('tool', {}).get('semantic_release', {}).get('commit_parser_options')
+
+if opts is None:
+    print("OK: no commit_parser_options override — uses PSR defaults per #506")
+    raise SystemExit
+
+minor = opts.get('minor_tags')
+patch = opts.get('patch_tags')
+# Flag the sample-plugin copy-paste (the case #506 explicitly warns against)
+if minor == SAMPLE_MINOR or patch == SAMPLE_PATCH:
+    print("FAIL: [tool.semantic_release.commit_parser_options] copies the "
+          "backend-plugin-sample override — #506 says other libraries must use "
+          "the DEFAULT (minor: feat; patch: fix, perf). Remove the block unless "
+          "this repo has a documented reason to release on other commit types.")
+    print(f"      Found minor_tags={minor!r}, patch_tags={patch!r}")
+else:
+    # A different, presumably deliberate custom policy — allowed by #506's
+    # "unless you know for sure you need to use something different".
+    print(f"WARN: custom commit_parser_options present (minor={minor!r}, "
+          f"patch={patch!r}) — allowed only if intentional per #506; else remove it")
+PYEOF
+```
+
+**Pass:** no `commit_parser_options` block (PSR defaults, the #506 standard for other libraries) → SKIP for non-PyPI. **Fail:** the block copies the `backend-plugin-sample` override (`minor_tags`/`patch_tags` equal to the sample's values) without justification. **Warn:** a different custom override is present — permitted only when the repo genuinely needs it per #506.
 
 ### Test 250 — uv run tox in CI (not bare tox)
 
@@ -4138,3 +4521,49 @@ PYEOF
 **Pass:** No `echo "$PWD/.venv/bin" >> "$GITHUB_PATH"` (or similar `.venv/bin` path injection) in any workflow file.
 
 **Fail:** Such an echo exists — remove it and update the tool invocation to use `uv run <tool>`.
+
+### Test 395 — No unnecessary `fetch-depth: 0` in CI checkout
+
+The org reference CI workflows ([openedx/sample-plugin](https://github.com/openedx/sample-plugin/blob/main/.github/workflows/backend-ci.yml) and [openedx/xblocks-extra](https://github.com/openedx/xblocks-extra/blob/main/.github/workflows/ci.yml)) use the **default shallow checkout** — they do **not** set `fetch-depth: 0` — even though both use the same `setuptools-scm` + `fallback_version` versioning setup. A full-history checkout (`fetch-depth: 0`) fetches every commit and tag, which only slows the CI workflow, and it is not required for correctness:
+
+- `setuptools-scm` simply falls back to `fallback_version` for the throwaway build artifact produced by the `quality`/`docs` jobs — nothing in the test suite asserts a specific `__version__`, and CI never publishes that artifact.
+- The real release (`release.yml`) sets `SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION`, so publishing does not depend on checkout depth at all.
+
+So `fetch-depth: 0` in the CI test workflow is an unnecessary deviation from the reference standard and should be removed. **`release.yml` is exempt** — `python-semantic-release` legitimately needs full history/tags — so this test targets only the CI test workflow (`ci.yml` / `python-tests.yml`).
+
+```bash
+python3 << 'PYEOF'
+import re, glob, os
+
+# Only the CI test workflow — release.yml may legitimately need full history for python-semantic-release.
+CI_WORKFLOWS = [p for p in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml')
+                if re.search(r'(ci|python-tests)\.ya?ml$', os.path.basename(p))]
+
+failures = []
+for wf in CI_WORKFLOWS:
+    try:
+        content = open(wf).read()
+    except FileNotFoundError:
+        continue
+    for i, line in enumerate(content.splitlines(), 1):
+        if re.search(r'^\s*fetch-depth\s*:\s*0\s*(#.*)?$', line):
+            failures.append(f"{wf}:{i}: sets 'fetch-depth: 0' — unnecessary full-history checkout")
+
+if not CI_WORKFLOWS:
+    print("SKIP: no ci.yml / python-tests.yml found")
+elif failures:
+    for f in failures:
+        print(f"FAIL: {f}")
+    print("  Remove 'fetch-depth: 0' from the CI checkout step. The reference CI workflows")
+    print("  (openedx/sample-plugin, openedx/xblocks-extra) use the default shallow checkout with the")
+    print("  same setuptools-scm + fallback_version setup. Full history only slows CI: setuptools-scm")
+    print("  falls back to fallback_version for the throwaway build artifact, and the real release uses")
+    print("  SETUPTOOLS_SCM_PRETEND_VERSION. release.yml is exempt (PSR needs history).")
+else:
+    print("OK: CI checkout uses default shallow depth (no unnecessary fetch-depth: 0)")
+PYEOF
+```
+
+**Pass:** The CI test workflow's `actions/checkout` step does not set `fetch-depth: 0` (or no CI workflow exists → SKIP).
+
+**Fail:** `ci.yml` (or `python-tests.yml`) sets `fetch-depth: 0` on its checkout — remove it to match the reference standard and speed up CI.
