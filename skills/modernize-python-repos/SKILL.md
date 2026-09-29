@@ -438,7 +438,12 @@ uv_constraints = [
 ```toml
 [tool.coverage.run]
 branch = true
-source = [""]   # package import name from [run] source= in .coveragerc
+# For src/ layout repos use source = ["src"] — it tracks every .py file under
+# src/ by path, so packages that are never imported (e.g. loncapa-style check
+# scripts) still appear in the report.  source_pkgs resolves by import name and
+# silently drops any package that pytest never imports, skewing the numbers.
+# For flat layout (no src/ dir): use source = ["<package_import_name>"] instead.
+source = ["src"]   # for src/ layout; replace with source = ["<pkg>"] for flat layout
 omit = [
     "*/tests/*",
     "*/migrations/*",
@@ -526,6 +531,11 @@ exclude Makefile
 exclude conftest.py
 exclude .gitignore
 exclude tox.ini
+
+# Exclude test/coverage artifacts (only if repo uses pytest-cov/coverage)
+prune htmlcov
+global-exclude .coverage
+global-exclude coverage.xml
 ```
 
 **Step 4 — Verify no assets are silently dropped** (also done in Step 5 final verification and Test 30):
@@ -766,7 +776,7 @@ For each hit, replace the `pip install -r` line using this mapping — **match t
 
 | Old command | Correct replacement |
 |---|---|
-| `pip install -r requirements/base.txt` | `uv sync` (no group — runtime deps only from `[project].dependencies`) |
+| `pip install -r requirements/base.txt` | `uv sync --no-default-groups` (runtime deps only — bare `uv sync` installs the `dev` group by default, ballooning the install from ~30 to ~90 packages) |
 | `pip install -r requirements/test.txt` | `uv sync --group test` |
 | `pip install -r requirements/quality.txt` | `uv sync --group quality` |
 | `pip install -r requirements/doc.txt` | `uv sync --group doc` |
@@ -774,7 +784,20 @@ For each hit, replace the `pip install -r` line using this mapping — **match t
 
 **Do NOT map a narrow-scope target (e.g. `base_requirements`) to `uv sync --group dev`.** That installs all dev/test/quality packages where only runtime deps were intended.
 
-**Keep and do not rename** everything else: `lint`, `test`, `test-with-coverage`, `docs`, and all other targets on master. Their implementations can stay as-is — they call the linters/pytest directly, and tox manages the environment around them.
+**Keep and do not rename** everything else: `lint`, `test`, `test-with-coverage`, `docs`, and all other targets on master. Their implementations call the linters/pytest directly; tox manages the environment around them.
+
+**No `uv run` prefix in Makefile targets (except `upgrade`)** — Feanil's rule (2026-09-28): Makefiles must not assume or force the uv environment. The developer controls their environment — locally by activating the venv or manually prefixing `uv run`, in CI by using `uv run tox` in the workflow step (not in the Makefile). Strip `uv run` from every target body except `upgrade`. Use bare tool names:
+
+```makefile
+test:
+	pytest tests/           # not: uv run pytest tests/
+
+quality:
+	pylint src/             # not: uv run pylint src/
+	isort --check-only src/ # not: uv run isort --check-only src/
+```
+
+Exception: `upgrade` keeps its `uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml` line because the upgrade workflow requires it.
 
 #### 2.6 — Update CI workflow
 
@@ -2078,6 +2101,70 @@ else:
     print(f"OK: all {len(master_pkgs)} master requirement(s) covered by pyproject.toml / uv.lock")
 PYEOF
 
+# --- Check 26: no uv run in Makefile targets (except upgrade); CI calls make via uv run ---
+echo "--- Check 26: Makefile uv run absence + CI uv run make parity ---"
+python3 << 'PYEOF'
+import re, glob
+
+failures = []
+
+# Part A: no uv run in Makefile targets (except upgrade)
+try:
+    content = open('Makefile').read()
+    current_target = None
+    for line in content.splitlines():
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_.-]*)\s*:', line)
+        if m and not line.startswith('\t'):
+            current_target = m.group(1)
+            continue
+        if line.startswith('\t') and current_target != 'upgrade':
+            if re.search(r'\buv\s+run\b', line):
+                failures.append(f"  [Makefile] make {current_target}: {line.strip()!r}")
+    if not any('[Makefile]' in f for f in failures):
+        print("Part A OK: no 'uv run' in Makefile targets (upgrade exempt)")
+except FileNotFoundError:
+    print("Part A SKIP: no Makefile found")
+
+# Part B: CI steps that call make directly must use uv run make
+for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+    try:
+        content = open(wf_path).read()
+    except FileNotFoundError:
+        continue
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r'^\s*run:\s*(make\b.*)', line)
+        if m:
+            failures.append(
+                f"  [CI] {wf_path}:{i+1}: bare 'make' — use 'uv run make ...': {m.group(1).strip()!r}"
+            )
+        if re.match(r'^\s*run:\s*\|', line):
+            for j in range(i+1, min(i+20, len(lines))):
+                sub = lines[j]
+                if re.match(r'^\s{8,}make\b', sub) and not re.search(r'uv\s+run\s+make\b', sub):
+                    failures.append(
+                        f"  [CI] {wf_path}:{j+1}: bare 'make' in multi-line run — use 'uv run make ...': {sub.strip()!r}"
+                    )
+                elif sub.strip() and not sub.startswith(' ' * 8):
+                    break
+
+makefile_fails = [f for f in failures if '[Makefile]' in f]
+ci_fails = [f for f in failures if '[CI]' in f]
+
+if makefile_fails:
+    print("Part A FAIL: 'uv run' found in Makefile targets outside 'upgrade'.")
+    print("  Strip 'uv run' and use bare tool names. 'upgrade' is the only exception.")
+    for f in makefile_fails: print(f)
+if ci_fails:
+    print("Part B FAIL: CI step calls bare 'make' without 'uv run'.")
+    print("  Change 'run: make <target>' to 'run: uv run make <target>'.")
+    for f in ci_fails: print(f)
+if not failures:
+    print("Part A+B OK: Makefile clean; CI make calls use uv run make (or route through uv run tox)")
+else:
+    raise SystemExit(1)
+PYEOF
+
 echo "======= END PRE-PR VALIDATION ======="
 ```
 
@@ -2099,6 +2186,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] Makefile `upgrade` → `edx_lint write_uv_constraints` + `uv lock --upgrade`
 - [ ] Makefile `requirements` → `uv sync --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
 - [ ] Makefile `test`/`lint` targets invoked by tox use plain `python`/tool invocations — **no `uv run --group`** (that re-syncs the venv and overrides the Django/package version tox installed)
+- [ ] Makefile targets do **not** use `uv run <tool>` prefix (e.g. `pytest`, not `uv run pytest`) — exception: `upgrade` keeps its `uv run --with edx-lint` line
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
 - [ ] CI uses `astral-sh/setup-uv`, `uv sync --group ci`, `uv run tox`, named `ci.yml`
 - [ ] CI does **not** set `fail-fast` (it defaults to `true`); `strategy:` block in parity with master
@@ -2111,7 +2199,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `make lint` exits 0
 - [ ] `make test` exits 0
 - [ ] `uv lock --check` exits 0
-- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope, Check 23: requirements coverage — every master `requirements/*.in` package survives in pyproject.toml/uv.lock, filename-agnostic, Check 24: tox-called Makefile targets do not use `uv run --group`, Check 25: no dead `[tool.coverage.run]` block in non-Python-test repos)
+- [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope, Check 23: requirements coverage — every master `requirements/*.in` package survives in pyproject.toml/uv.lock, filename-agnostic, Check 24: tox-called Makefile targets do not use `uv run --group`, Check 25: no dead `[tool.coverage.run]` block in non-Python-test repos, Check 26: no `uv run` in Makefile targets outside `upgrade`)
 - [ ] Coverage thresholds match master (no invented `fail_under`)
 - [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
 - [ ] `__version__` in package `__init__.py` uses `importlib.metadata.version("<pkg>")` — never remove `__version__` entirely
@@ -2311,11 +2399,11 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-10390), in order, Test 10 through Test 395.
+Run **all** tests from the [Test suite](#test-suite--tests-10410), in order, Test 10 through Test 410.
 
 **Test 10 is a hard gate.** If ruff is present, Test 10 fails: **stop running the remaining tests**, report only Test 10's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 10 halts — record them as `⏭️ Skipped (halted at Test 10 — ruff present)`.
 
-Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 80 when the repo is in the hardcoded non-PyPI list, Test 110 always (gated — only runs on explicit user request), Test 180 when the repo is in the hardcoded non-PyPI list, Test 210 always (gated — only runs on explicit user request), Test 220 when the user opted out of the src/ move, Test 230 when master did not use mypy, Test 360 when master had no isort config in any config file). Record the outcome of every single test.
+Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 80 when the repo is in the hardcoded non-PyPI list, Test 110 always (gated — only runs on explicit user request), Test 180 when the repo is in the hardcoded non-PyPI list, Test 210 always (gated — only runs on explicit user request), Test 220 when the user opted out of the src/ move, Test 230 when master did not use mypy, Test 355 when master had no Makefile, Test 360 when master had no isort config in any config file, Test 400 when master had no `upgrade-python-requirements.yml`, Test 405 when repo uses flat layout, Test 410 when `.readthedocs.yaml` is absent, Test 415 when master had no `requirements/base.txt`). Record the outcome of every single test.
 
 ### Step 3 — Report
 
@@ -2354,11 +2442,16 @@ Template:
 | Test#330 | tox commands invoke make targets | ✅ Pass | |
 | Test#340 | Dependency groups use include-group | ✅ Pass | all -r references use include-group |
 | Test#350 | Makefile targets run tools directly | ✅ Pass | |
+| Test#355 | No `uv run` in Makefile targets (except upgrade) | ✅ Pass | |
 | Test#360 | isort style unchanged | ✅ Pass | — OR — ⏭️ Skipped (no isort config on master) |
 | Test#370 | No source-tracing comments in dependency-groups | ✅ Pass | |
 | Test#380 | Required tox environments present | ✅ Pass | py, quality, docs all present |
 | Test#390 | No manual venv GITHUB_PATH echo in CI | ✅ Pass | |
 | Test#395 | No unnecessary fetch-depth: 0 in CI checkout | ✅ Pass | CI uses default shallow checkout |
+| Test#400 | `upgrade-python-requirements.yml` not deleted | ✅ Pass | workflow present in PR branch |
+| Test#405 | Coverage `source` config correct for layout | ✅ Pass | — OR — ⏭️ Skipped (flat layout) |
+| Test#410 | `.readthedocs.yaml` uses uv install method | ✅ Pass | — OR — ⏭️ Skipped (no .readthedocs.yaml) |
+| Test#415 | `uv sync` scope matches original pip-sync scope | ✅ Pass | — OR — ⏭️ Skipped (no requirements/base.txt on master) |
 
 ## Failure details
 
@@ -2370,7 +2463,7 @@ If Test 10 halts, the table lists Test#10 as `🛑 Halt` and every other row as 
 
 ---
 
-## Test suite — Tests 10–390
+## Test suite — Tests 10–410
 
 All tests must be run as part of a verification report (Test/Verify mode). **Test 10 is a hard gate — if it fails, halt.**
 
@@ -2387,7 +2480,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Versioning | 240, 245, 246 | Versioning strategy: setuptools-scm (PyPI) or static version (no-PyPI), including 0.x guard; PSR `tag_format` matches existing release tags (245, offline) and a matching baseline tag exists for the latest PyPI release (246, ground-truth) — else manual baseline tag required |
 | Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
 | Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
-| Makefile | 20, 140, 350 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox) |
+| Makefile | 20, 140, 350, 355 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox); no `uv run` prefix in target bodies (except `upgrade`) |
 | GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390, 395 | YAML valid; branch protection preserved; CI-first + immutable-safe `gh release create` (`vcs_release: "false"`, no `publish-action`) + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo; no unnecessary `fetch-depth: 0` in CI checkout |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
@@ -2482,9 +2575,12 @@ Check that the tarball includes **all** of the following (adjust paths to match 
 | Static assets (e.g. `*.html`, `*.css`, `*.js`, `*.png` under the package) | Any non-`.py` file referenced by `package_data` or `MANIFEST.in` |
 
 Flag as a failure if:
-- Deleted files (`setup.py`, `setup.cfg`) appear in the tarball — they should not be included after deletion. `CHANGELOG.rst` (if present) is deprecated and must not be packaged either.
+- `setup.py` appears in the tarball — it should be deleted as part of the migration and must not be packaged.
+- `CHANGELOG.rst` (if present) is deprecated and must not be packaged.
 - The source package directory is missing or empty.
 - Static assets that existed before the migration are absent — their absence will break installs.
+
+**Note — `setup.cfg` in the tarball is expected and not a failure.** Setuptools auto-generates a minimal `setup.cfg` (containing only `[egg_info]` metadata) during the build process even when the repo's own `setup.cfg` has been deleted. This auto-generated file is a normal setuptools artifact, not the stale pre-migration config.
 
 **Step 3b — `MANIFEST.in` prunes test/build artifacts (deterministic — independent of build-time tree state):**
 
@@ -2587,9 +2683,9 @@ diff \
 git worktree remove /tmp/bundle-worktree-main --force
 ```
 
-**Pass:** PR tarball contains all required files; no deleted file reappears; PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel; Step 3b reports OK or SKIP (SKIP for any non-PyPI repo, or a repo with no coverage artifacts).
+**Pass:** PR tarball contains all required files; `setup.py` not in tarball (`setup.cfg` is auto-generated by setuptools and is expected — not a failure); PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel; Step 3b reports OK or SKIP (SKIP for any non-PyPI repo, or a repo with no coverage artifacts).
 
-**Fail:** Any deleted file reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression); Step 3b FAILs (a PyPI repo whose `MANIFEST.in` omits prune rules for generated artifacts).
+**Fail:** `setup.py` reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression); Step 3b FAILs (a PyPI repo whose `MANIFEST.in` omits prune rules for generated artifacts).
 
 ### Test 40 — Lockfile consistency
 
@@ -2637,13 +2733,13 @@ uv run python -m setuptools_scm
 
 This should print a version string.
 
-### Test 130 — `__version__` uses `importlib.metadata` pattern
+### Test 130 — `__version__` uses `importlib.metadata` pattern and is in a shipped file
 
 ```bash
 grep -rn '__version__' --include='*.py' . | grep -v '\.tox' | grep -v '/test'
 ```
 
-**Pass criteria — both must hold:**
+**Pass criteria — all three must hold:**
 1. No hardcoded `__version__ = "x.y.z"` string remains in package source.
 2. `importlib.metadata.version("<package-name>")` is used in the package `__init__.py` (with or without a `try/except PackageNotFoundError` wrapper — both are acceptable):
 
@@ -2653,7 +2749,105 @@ from importlib.metadata import version
 __version__ = version("<package-name>")
 ```
 
-`__version__` should always be kept as a norm — do not remove it entirely.
+3. The file containing `__version__` is inside a package or module that actually ships in the wheel.
+   A root-level `__init__.py` is never included by `packages.find where = ["src"]`. A file under
+   `src/<pkg>/` only ships if `<pkg>` is discoverable by the packaging config. Cross-reference
+   the file's location against `pyproject.toml` to confirm it will be included:
+
+```bash
+python3 << 'PYEOF'
+import os, re, subprocess, tomllib
+
+# Find files containing importlib-based __version__
+result = subprocess.run(
+    ["grep", "-rln", "__version__", "--include=*.py", "."],
+    capture_output=True, text=True
+)
+candidates = [
+    l.lstrip("./") for l in result.stdout.splitlines()
+    if ".tox" not in l and "/test" not in l
+]
+version_files = []
+for f in candidates:
+    try:
+        if "importlib" in open(f).read():
+            version_files.append(f)
+    except Exception:
+        pass
+
+if not version_files:
+    print("SKIP: no importlib-based __version__ found — acceptable if repo has no canonical top-level package")
+    raise SystemExit(0)
+
+try:
+    with open("pyproject.toml", "rb") as fh:
+        data = tomllib.load(fh)
+except Exception as e:
+    print(f"FAIL: could not read pyproject.toml — {e}")
+    raise SystemExit(1)
+
+setuptools = data.get("tool", {}).get("setuptools", {})
+py_modules = setuptools.get("py-modules", [])
+find_cfg = setuptools.get("packages", {}).get("find", {})
+find_where = find_cfg.get("where", ["."])   # default: repo root
+find_exclude = find_cfg.get("exclude", [])
+
+uses_src = os.path.isdir("src")
+
+for vf in version_files:
+    parts = vf.replace("\\", "/").split("/")
+
+    # Case 1: root-level __init__.py (e.g. __init__.py with no package parent)
+    if parts == ["__init__.py"]:
+        print(f"FAIL: {vf} — root __init__.py never ships in any layout")
+        print("  Fix: move __version__ into a package under src/, or drop it if no canonical package exists")
+        continue
+
+    # Case 2: standalone module (e.g. src/eia.py or eia.py)
+    if len(parts) == 1 or (len(parts) == 2 and parts[0] in find_where):
+        mod = parts[-1].replace(".py", "")
+        if mod in py_modules:
+            print(f"OK: {vf} — module '{mod}' ships via py-modules")
+        else:
+            print(f"FAIL: {vf} — module '{mod}' not listed in py-modules, will not ship")
+        continue
+
+    # Case 3: package __init__.py (e.g. src/mypkg/__init__.py or mypkg/__init__.py)
+    if parts[-1] == "__init__.py":
+        # Determine the package root relative to the find_where directory
+        if parts[0] in find_where:
+            pkg_name = parts[1] if len(parts) > 2 else None
+        else:
+            pkg_name = parts[0]
+
+        if not pkg_name:
+            print(f"FAIL: {vf} — could not determine package name")
+            continue
+
+        excluded = any(
+            re.fullmatch(pat.replace("*", ".*"), pkg_name) for pat in find_exclude
+        )
+        if excluded:
+            print(f"FAIL: {vf} — package '{pkg_name}' is excluded by packages.find exclude config")
+            print("  Fix: remove the exclude rule or move __version__ to a package that ships")
+        else:
+            # Check the package directory actually exists under find_where
+            for w in find_where:
+                pkg_path = os.path.join(w, pkg_name) if w != "." else pkg_name
+                if os.path.isdir(pkg_path):
+                    print(f"OK: {vf} — package '{pkg_name}' is under '{w}/' and will ship in the wheel")
+                    break
+            else:
+                print(f"FAIL: {vf} — package directory '{pkg_name}' not found under {find_where}")
+    else:
+        print(f"INFO: {vf} — unexpected location, inspect manually")
+PYEOF
+```
+
+**When to drop `__version__` instead:** if the repo ships multiple unrelated packages/modules under
+one distribution name with no canonical top-level package (e.g. codejail-includes ships `loncapa`,
+`verifiers`, and `eia` independently), there is no natural home for `__version__`. In that case,
+dropping it is cleaner than inventing a new package directory just to hold it.
 
 
 ### Test 90 — No stale files on disk
@@ -4276,7 +4470,7 @@ PYEOF
 
 ### Test 350 — Makefile targets run tools directly (not via tox)
 
-Feanil's rule (mockprock #66): "The make targets should just run the tests in the environment they exist in. `uv run pytest`." Delegating from Makefile to tox makes local iteration painful — developers must spin up a full tox environment just to run a quick test. The Makefile is the direct interface; tox is the CI wrapper.
+Feanil's rule (mockprock #66, updated 2026-09-28): Makefile targets must invoke tools directly — not via tox. Delegating from Makefile to tox makes local iteration painful — developers must spin up a full tox environment just to run a quick test. The Makefile is the direct interface; tox is the CI wrapper. (For the complementary rule that Makefile targets must also not use `uv run` as a prefix, see Test 355.)
 
 ```bash
 python3 << 'PYEOF'
@@ -4319,9 +4513,93 @@ else:
 PYEOF
 ```
 
-**Pass:** Core Makefile targets (`test`, `lint`/`quality`, `test-with-coverage`, `docs`) invoke tools directly via `uv run <tool>`, not by calling tox.
+**Pass:** Core Makefile targets (`test`, `lint`/`quality`, `test-with-coverage`, `docs`) invoke tools directly (bare tool names — no `uv run` prefix), not by calling tox.
 
 **Fail:** A core Makefile target delegates to tox (`uv run tox -e ...`) — this forces tox for local dev and defeats the purpose of having Makefile targets.
+
+### Test 355 — No `uv run` in Makefile targets (except `upgrade`); CI calls `make` via `uv run`
+
+Feanil's rule (2026-09-28): Makefiles must not force or assume a uv environment. The `uv run` prefix belongs in the caller, not the Makefile. Two complementary checks:
+
+**Part A — Makefile:** Strip `uv run` from every target body except `upgrade`. Locally the developer activates the venv; the Makefile just runs the bare tool.
+
+**Part B — CI workflows:** Any workflow step that calls `make <target>` directly (i.e. not routed through `uv run tox`) must prefix with `uv run make <target>` so the uv-managed environment is active. The standard modernized CI calls `uv run tox -e <env>` (which already activates the env), so Part B only applies to repos whose CI calls `make` directly.
+
+```bash
+python3 << 'PYEOF'
+import re, glob
+
+failures = []
+
+# ── Part A: no uv run in Makefile targets (except upgrade) ──────────────────
+try:
+    makefile = open('Makefile').read()
+    current_target = None
+    for line in makefile.splitlines():
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_.-]*)\s*:', line)
+        if m and not line.startswith('\t'):
+            current_target = m.group(1)
+            continue
+        if line.startswith('\t') and current_target != 'upgrade':
+            if re.search(r'\buv\s+run\b', line):
+                failures.append(f"  [Makefile] make {current_target}: {line.strip()!r}")
+    if not any('[Makefile]' in f for f in failures):
+        print("Part A OK: no 'uv run' in Makefile targets (upgrade exempt)")
+except FileNotFoundError:
+    print("Part A SKIP: no Makefile found")
+
+# ── Part B: CI steps that call make directly must use uv run make ────────────
+for wf_path in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'):
+    try:
+        content = open(wf_path).read()
+    except FileNotFoundError:
+        continue
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        # A `run:` step whose value starts with bare `make` (not `uv run make`, not `uv run tox`)
+        m = re.match(r'^\s*run:\s*(make\b.*)', line)
+        if m:
+            cmd = m.group(1).strip()
+            failures.append(
+                f"  [CI] {wf_path}:{i+1}: bare 'make' call — use 'uv run make ...' instead: {cmd!r}"
+            )
+        # Multi-line run block: look for a line that is just `make <target>` inside a | block
+        if re.match(r'^\s*run:\s*\|', line):
+            for j in range(i+1, min(i+20, len(lines))):
+                sub = lines[j]
+                if re.match(r'^\s{8,}make\b', sub) and not re.search(r'uv\s+run\s+make\b', sub):
+                    failures.append(
+                        f"  [CI] {wf_path}:{j+1}: bare 'make' in multi-line run — use 'uv run make ...': {sub.strip()!r}"
+                    )
+                elif sub.strip() and not sub.startswith(' ' * 8):
+                    break
+
+if failures:
+    makefile_fails = [f for f in failures if '[Makefile]' in f]
+    ci_fails = [f for f in failures if '[CI]' in f]
+    if makefile_fails:
+        print("Part A FAIL: 'uv run' found in Makefile targets outside 'upgrade'.")
+        print("  Strip 'uv run' and use bare tool names. The 'upgrade' target is the only exception.")
+        for f in makefile_fails: print(f)
+    if ci_fails:
+        print("Part B FAIL: CI workflow step calls bare 'make' without 'uv run'.")
+        print("  Change 'run: make <target>' to 'run: uv run make <target>' so the uv venv is active.")
+        for f in ci_fails: print(f)
+    raise SystemExit(1)
+else:
+    print("Part B OK: all CI 'make' calls use 'uv run make'  (or CI routes through 'uv run tox')")
+PYEOF
+```
+
+**Pass:**
+- Part A: No `uv run` in any Makefile target body except `upgrade`. (`uv sync` and `uv lock` are fine — they are package-management commands, not tool runners.)
+- Part B: No CI workflow step calls bare `make` directly — either it goes through `uv run tox` (standard pattern) or it uses `uv run make <target>`.
+
+**Fail:**
+- Part A: A Makefile target (other than `upgrade`) contains `uv run` — strip the prefix.
+- Part B: A CI `run:` step calls `make <target>` without `uv run` — prepend `uv run` to the step's `run:` value.
+
+---
 
 ### Test 360 — isort import style unchanged from master
 
@@ -4568,3 +4846,266 @@ PYEOF
 **Pass:** The CI test workflow's `actions/checkout` step does not set `fetch-depth: 0` (or no CI workflow exists → SKIP).
 
 **Fail:** `ci.yml` (or `python-tests.yml`) sets `fetch-depth: 0` on its checkout — remove it to match the reference standard and speed up CI.
+
+### Test 400 — `upgrade-python-requirements.yml` not deleted
+
+Feanil's explicit requirement (flagged in i18n-tools PR #288): never delete `.github/workflows/upgrade-python-requirements.yml`. The shared `openedx/.github` workflow it calls installs uv and runs plain `make upgrade` — the uv path — so it does NOT depend on pip-compile. Removing it kills weekly automated dependency upgrades. On repos where this workflow was previously broken (pip-tools vs current pip), migrating to uv *fixes* it.
+
+SKIP this test if master did not have `upgrade-python-requirements.yml` (i.e. the repo never had one — don't invent it).
+
+```bash
+python3 << 'PYEOF'
+import os, subprocess
+
+# Check if main/master had the file
+main_branch = "main"
+result = subprocess.run(
+    ["git", "show", f"origin/{main_branch}:.github/workflows/upgrade-python-requirements.yml"],
+    capture_output=True
+)
+if result.returncode != 0:
+    # Try master
+    result = subprocess.run(
+        ["git", "show", "origin/master:.github/workflows/upgrade-python-requirements.yml"],
+        capture_output=True
+    )
+    if result.returncode != 0:
+        print("SKIP: upgrade-python-requirements.yml was not present on main/master — nothing to preserve")
+        exit(0)
+
+# File existed on main — check it's still present in the PR branch
+if os.path.exists(".github/workflows/upgrade-python-requirements.yml"):
+    print("OK: upgrade-python-requirements.yml is present in PR branch")
+else:
+    print("FAIL: upgrade-python-requirements.yml was deleted from the PR branch")
+    print("  Restore it: git show origin/main:.github/workflows/upgrade-python-requirements.yml > .github/workflows/upgrade-python-requirements.yml")
+    print("  Reason: this workflow uses openedx/.github's shared workflow which installs uv")
+    print("  and runs plain 'make upgrade' — it does NOT depend on pip-compile. Removing it")
+    print("  kills weekly automated dependency upgrades. (Feanil, i18n-tools PR #288)")
+PYEOF
+```
+
+**Pass:** File is present in the PR branch (or was never on main → SKIP).
+
+**Fail:** File was on main but is missing from the PR branch — restore it from main.
+
+---
+
+### Test 405 — Coverage `source` config correct for layout
+
+For repos with a `src/` layout, `[tool.coverage.run]` must use `source = ["src"]` (pointing at
+the directory). Using `source_pkgs = ["pkg"]` resolves by import name — any package that pytest
+never imports is silently dropped from the report (e.g. a package containing only standalone
+scripts). `source = ["src"]` tracks every `.py` file under `src/` by path regardless of imports.
+
+The only wrong form is `source = ["<pkg_name>"]` where `<pkg_name>` is a package directory that
+lives under `src/` — that directory doesn't exist at the repo root so coverage measures nothing.
+
+SKIP this test if the repo does not use a `src/` layout (no `src/` directory).
+
+```bash
+python3 << 'PYEOF'
+import os, tomllib
+
+if not os.path.isdir("src"):
+    print("SKIP: repo does not use src/ layout — source= is correct for flat layout")
+    raise SystemExit(0)
+
+try:
+    with open("pyproject.toml", "rb") as f:
+        data = tomllib.load(f)
+except Exception as e:
+    print(f"FAIL: could not read pyproject.toml — {e}")
+    raise SystemExit(1)
+
+cov_run = data.get("tool", {}).get("coverage", {}).get("run", {})
+src_subdirs = {d for d in os.listdir("src") if os.path.isdir(os.path.join("src", d))}
+
+source = cov_run.get("source", [])
+source_pkgs = cov_run.get("source_pkgs", [])
+
+if not source and not source_pkgs:
+    print("SKIP: no [tool.coverage.run].source or source_pkgs found — nothing to verify")
+    raise SystemExit(0)
+
+# Preferred: source = ["src"]
+if source == ["src"]:
+    print("OK: [tool.coverage.run] uses source = ['src'] (correct — tracks all files under src/ by path)")
+    raise SystemExit(0)
+
+# Also acceptable: source_pkgs pointing at real packages
+if source_pkgs:
+    bad = [p for p in source_pkgs if p in src_subdirs]
+    if bad:
+        print(f"WARN: source_pkgs = {source_pkgs!r} — packages {bad!r} exist under src/ but may be")
+        print(f"  silently dropped if pytest never imports them. Prefer source = ['src'] instead.")
+    else:
+        print(f"OK: [tool.coverage.run] uses source_pkgs = {source_pkgs!r}")
+    raise SystemExit(0)
+
+# source = ["<pkg_name>"] where pkg_name is a subdir of src/ — the broken case
+bad_source = [s for s in source if s in src_subdirs]
+if bad_source:
+    print(f"FAIL: [tool.coverage.run] uses source = {source!r} but {bad_source!r} live under src/")
+    print(f"  Fix: change to source = ['src']")
+    print(f"  Reason: source= resolves by path from repo root; the directory doesn't exist there.")
+else:
+    print(f"OK: [tool.coverage.run] uses source = {source!r}")
+PYEOF
+```
+
+**Pass:** `source = ["src"]` is used (preferred), or `source_pkgs` pointing at valid package names, or repo is flat layout → SKIP.
+
+**Fail:** `source = ["<pkg_name>"]` where `<pkg_name>` is a subdirectory of `src/` — that directory doesn't exist at the repo root so coverage silently measures nothing. Fix: `source = ["src"]`.
+
+---
+
+### Test 410 — `.readthedocs.yaml` uses uv install method (not pip)
+
+When the repo uses uv (i.e. has `uv.lock`), `.readthedocs.yaml` must install doc dependencies via `method: uv / command: sync / groups: [doc]`. Using `method: pip` with `extra_requirements` requires pip extras (`[project.optional-dependencies]`), which do not exist in a uv-migrated repo that uses PEP 735 dependency groups — RTD will fail to install Sphinx and the docs build will error.
+
+SKIP this test if `.readthedocs.yaml` does not exist in the repo.
+
+```bash
+python3 << 'PYEOF'
+import os, re
+
+if not os.path.exists(".readthedocs.yaml") and not os.path.exists(".readthedocs.yml"):
+    print("SKIP: no .readthedocs.yaml found")
+    raise SystemExit(0)
+
+rtd_file = ".readthedocs.yaml" if os.path.exists(".readthedocs.yaml") else ".readthedocs.yml"
+content = open(rtd_file).read()
+
+if not os.path.exists("uv.lock"):
+    print("SKIP: no uv.lock found — repo may not be uv-migrated yet")
+    raise SystemExit(0)
+
+# Check for pip method (old pattern)
+if re.search(r'method:\s*pip', content):
+    print(f"FAIL: {rtd_file} uses 'method: pip' but repo has uv.lock")
+    print("  RTD won't find any pip extras since dependencies moved to PEP 735 groups.")
+    print("  Fix: replace the python.install block with:")
+    print("    python:")
+    print("      install:")
+    print("        - method: uv")
+    print("          command: sync")
+    print("          groups:")
+    print("            - doc")
+    print("  (Use the group name as declared in [dependency-groups] in pyproject.toml — typically 'doc', not 'docs')")
+elif re.search(r'method:\s*uv', content):
+    # Check it uses groups, not extra_requirements
+    if re.search(r'extra_requirements', content):
+        print(f"FAIL: {rtd_file} uses 'method: uv' but still has 'extra_requirements' — should use 'groups' instead")
+    else:
+        print(f"OK: {rtd_file} uses uv install method with groups")
+else:
+    print(f"INFO: {rtd_file} install method is neither pip nor uv — manual inspection required")
+PYEOF
+```
+
+**Pass:** `.readthedocs.yaml` uses `method: uv` with `groups` (or file is absent → SKIP).
+
+**Fail:** `method: pip` is used in a uv-migrated repo — switch to the uv install method.
+
+### Test 415 — `uv sync` scope matches original pip-sync scope
+
+A bare `uv sync` installs the `dev` dependency group by default (uv's implicit default), pulling in
+tox, twine, pylint, pytest, Sphinx, and the full doc tree — typically 3× more packages than the
+runtime set. A Makefile target that previously used `pip-sync requirements/base.txt` (runtime only)
+must migrate to `uv sync --no-default-groups`, not bare `uv sync`.
+
+This test has two parts:
+
+**Part A — Makefile pattern check:** any `uv sync` call without a `--group` or `--no-default-groups`
+flag is a bare sync and installs too much for a runtime-only target.
+
+**Part B — Package count approximation:** count packages in the old `requirements/base.txt` from
+master and compare against `uv export --no-default-groups` in the PR branch. The counts should be
+within 25% of each other. A large divergence means the scope changed.
+
+```bash
+python3 << 'PYEOF'
+import subprocess, re, os, sys
+
+# --- Part A: Makefile bare uv sync check ---
+if not os.path.exists("Makefile"):
+    print("SKIP Part A: no Makefile found")
+else:
+    content = open("Makefile").read()
+    lines = content.splitlines()
+    bare_sync_lines = []
+    for i, line in enumerate(lines, 1):
+        # Match uv sync that has no --group, --no-default-groups, or --all-groups flag
+        if re.search(r'\buv sync\b', line) and not re.search(
+            r'--group|--no-default-groups|--all-groups', line
+        ):
+            bare_sync_lines.append((i, line.strip()))
+
+    if bare_sync_lines:
+        print("FAIL Part A: bare 'uv sync' found in Makefile (installs dev group by default):")
+        for lineno, text in bare_sync_lines:
+            print(f"  Line {lineno}: {text}")
+        print("  Fix: replace with 'uv sync --no-default-groups' for runtime-only targets,")
+        print("  or 'uv sync --group <name>' for a specific group (test/quality/doc/dev).")
+    else:
+        print("OK Part A: no bare 'uv sync' in Makefile")
+
+# --- Part B: package count approximation ---
+# Get old requirements/base.txt from master
+base_result = subprocess.run(
+    ["git", "show", "origin/main:requirements/base.txt"],
+    capture_output=True, text=True
+)
+if base_result.returncode != 0:
+    base_result = subprocess.run(
+        ["git", "show", "origin/master:requirements/base.txt"],
+        capture_output=True, text=True
+    )
+
+if base_result.returncode != 0:
+    print("SKIP Part B: no requirements/base.txt on main/master to compare against")
+    raise SystemExit(0)
+
+old_lines = [
+    l for l in base_result.stdout.splitlines()
+    if l.strip() and not l.startswith("#") and not l.startswith("-")
+]
+old_count = len(old_lines)
+
+# Count packages uv would install with --no-default-groups
+export_result = subprocess.run(
+    ["uv", "export", "--no-default-groups", "--no-hashes", "--quiet"],
+    capture_output=True, text=True
+)
+if export_result.returncode != 0:
+    print(f"SKIP Part B: 'uv export --no-default-groups' failed — {export_result.stderr.strip()[:120]}")
+    raise SystemExit(0)
+
+new_lines = [
+    l for l in export_result.stdout.splitlines()
+    if l.strip() and not l.startswith("#") and not l.startswith("-")
+]
+new_count = len(new_lines)
+
+delta = abs(new_count - old_count)
+pct = (delta / old_count * 100) if old_count else 0
+
+print(f"INFO Part B: old requirements/base.txt = {old_count} packages, "
+      f"uv export --no-default-groups = {new_count} packages ({pct:.0f}% delta)")
+
+if pct > 25:
+    print(f"FAIL Part B: package count diverged by {pct:.0f}% (>{25}% threshold).")
+    print(f"  If new count is much higher: a Makefile target may be using bare 'uv sync' (dev group)")
+    print(f"  or the scope of [project].dependencies changed significantly.")
+    print(f"  If new count is much lower: runtime dependencies may have been accidentally dropped.")
+else:
+    print(f"OK Part B: package count is within 25% of master's requirements/base.txt")
+PYEOF
+```
+
+**Pass:** No bare `uv sync` in Makefile AND package count within 25% of old `requirements/base.txt`.
+
+**Fail (Part A):** Bare `uv sync` found — installs dev group (~3× runtime count). Fix: `uv sync --no-default-groups` for runtime-only targets.
+
+**Fail (Part B):** Package count diverged >25% — scope likely changed. Investigate whether runtime deps were dropped or dev deps were accidentally included.
