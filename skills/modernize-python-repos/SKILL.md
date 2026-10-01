@@ -141,6 +141,14 @@ git show HEAD:.github/workflows/ci.yml 2>/dev/null | grep 'uses:.*@' || \
 
 # 15. Master's MANIFEST.in (record ALL lines — used in Step 1.2 to migrate assets)
 git show HEAD:MANIFEST.in 2>/dev/null
+
+# 16. Git-tracked symlinks in the package tree (mode 120000 = symlink).
+#     A translations/ symlink causes `python -m build --wheel` to fail with
+#     "doesn't exist or not a regular file" — setuptools-scm's file finder
+#     hands it to build_py regardless of package-data config.
+#     Record any hits here; Step 1.1 will add exclude-package-data for them.
+git ls-files --stage | awk '$1 == "120000" {print $4}' | grep -i 'translations' \
+  || echo "no git-tracked translation symlinks found"
 ```
 
 Before proceeding, summarize:
@@ -157,6 +165,7 @@ Before proceeding, summarize:
 | `constraints.txt` | exists / absent |
 | MANIFEST.in asset lines | e.g. `recursive-include pkg *.html *.js` |
 | CI action SHAs | e.g. `actions/checkout@<SHA> # v7.0.1` |
+| Translation symlinks | e.g. `src/pkg/translations` (mode 120000) — or none |
 
 **Reference — cross-check pyproject.toml structure against the org reference repo:**
 `openedx/sample-plugin` → `backend-plugin-sample/pyproject.toml` is the org-canonical example for `[build-system]`, `[tool.setuptools_scm]`, `[tool.semantic_release]`, and action SHA pinning style. Read it and match its structure for those sections.
@@ -220,7 +229,7 @@ name = "<package-name>"          # from setup.cfg [metadata] name
 description = "<short description>"  # from setup.cfg [metadata] description
 readme = "README.rst"            # set to actual filename; keep here only when NOT in dynamic
 requires-python = ">=3.12"
-license = "AGPL-3.0"             # SPDX identifier — verify against setup.cfg; may be "Apache-2.0"
+license = "AGPL-3.0-only"        # SPDX identifier — derive from master (see adaptation rules below)
 license-files = ["LICENSE*"]
 authors = [
     {name = "Open edX Project", email = "oscm@openedx.org"},
@@ -356,7 +365,18 @@ uv_constraints = [
 
 **Adaptation rules after writing the initial template:**
 - Replace `<package-name>`, `<short description>`, and `<repo-name>` from `setup.cfg`/`setup.py`
-- Set `license` to the correct SPDX identifier from `setup.cfg` (e.g. `"Apache-2.0"`)
+- **Set `license` by mirroring master exactly** — master is the source of truth; never change the license intent. Read `setup.cfg`/`setup.py` and map to the correct SPDX identifier:
+
+  | Master declares | SPDX identifier to use |
+  |---|---|
+  | No `license=` field and no `License ::` classifier | `"AGPL-3.0-only"` — nothing published says "or later"; default to `-only` |
+  | `license = AGPL-3.0` or `license = AGPL` or classifier `AGPLv3` / `v3` (no "or later") | `"AGPL-3.0-only"` |
+  | classifier `GNU Affero General Public License v3 or later (AGPLv3+)` or `license = AGPL-3.0-or-later` | `"AGPL-3.0-or-later"` |
+  | `license = Apache-2.0` or classifier `Apache Software License` | `"Apache-2.0"` |
+  | `license = MIT` | `"MIT"` |
+  | `license = BSD` or classifier `BSD License` | `"BSD-3-Clause"` (verify which BSD variant) |
+
+  **Critical:** `AGPL-3.0` is a deprecated/invalid SPDX identifier — always use `AGPL-3.0-only` or `AGPL-3.0-or-later`. The LICENSE file's "How to Apply These Terms to Your New Programs" appendix always contains "or later than version 3" as boilerplate template text — this is **not** a grant this repo makes. Ignore it; look only at `setup.cfg`/`setup.py`.
 - `authors` must **always** be exactly `[{name = "Open edX Project", email = "oscm@openedx.org"}]` — do not copy whatever was in `setup.cfg` or `setup.py`; this is the org-standard value for all repos
 - Verify the README filename on disk (`README.rst` vs `README.md`) and update `[tool.setuptools.dynamic]`; remove `readme` from `dynamic` if you set it as a static `readme =` field above
 - Remove `[project.entry-points]` sections that have no entries on master
@@ -365,6 +385,13 @@ uv_constraints = [
 - Adapt `[dependency-groups]` to mirror the actual `.in` files — remove groups whose `.in` doesn't exist, add packages from each `.in` file exactly; remove `django42`/`conflicts` if only one Django version is tested
 - Add `[tool.setuptools.package-data]` entries from master's `MANIFEST.in` non-`.py` asset patterns
 - Add zero-version guard to `[tool.semantic_release]` only if latest git tag starts with `0.`
+- **Translation symlink guard (PyPI repos only):** If pre-flight command #16 found a git-tracked `translations/` symlink, add `[tool.setuptools.exclude-package-data]` right after `[tool.setuptools.package-data]`. Without it, `python -m build --wheel` fails at release time with "doesn't exist or not a regular file" — `setuptools-scm`'s file finder lists the symlink and `build_py` tries to copy it as a regular file, regardless of what `package-data` says. Moving assets to `conf/locale/**/*` in `package-data` does not fix it; the symlink must be explicitly excluded:
+  ```toml
+  [tool.setuptools.exclude-package-data]
+  "*" = ["tests*", "*.tests*", "spec*", "*.spec*"]
+  <package_name> = ["translations"]  # git-tracked symlink — build_py cannot copy symlinks
+  ```
+  Replace `<package_name>` with the package directory name (e.g. `drag_and_drop_v2`). This failure is invisible in CI because the standard matrix never runs `python -m build --wheel`; it surfaces only on the first `release.yml` run after merge.
 
 **For non-PyPI repos** (release gate: no) — use a static version, no setuptools-scm:
 
@@ -381,7 +408,7 @@ version = ""                     # fetch from master: check setup.cfg [metadata]
                                  # bump manually at each release
 description = ""
 requires-python = ">=3.12"
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"       # SPDX identifier — derive from master (see adaptation rules below)
 license-files = ["LICENSE*"]
 authors = [
     {name = "Open edX Project", email = "oscm@openedx.org"},
@@ -463,6 +490,16 @@ show_missing = true
 # addopts = "--reuse-db"
 # DJANGO_SETTINGS_MODULE = "test_settings"
 ```
+
+**Critical — `addopts` with `--cov <dir>`:** If master's `addopts` contains `--cov <testdir>` (e.g. `--cov tests`), **drop the directory argument** and keep bare `--cov`:
+
+```toml
+# Master had: addopts = "--cov tests --cov-report term-missing"
+# Correct migration:
+addopts = "--cov --cov-report term-missing"
+```
+
+Why: `--cov <dir>` tells pytest-cov to measure that specific directory, overriding `[tool.coverage.run] source` in `pyproject.toml`. With bare `--cov`, pytest-cov defers to `source = ["src"]` and correctly measures the package instead of the test files. This was invisible on master because there was no `source` config — the conflict only surfaces after the migration adds it. Also delete `pytest.ini` after migrating — keeping it alongside `pyproject.toml` is redundant and confusing.
 
 **Tooling config** — migrate from setup.cfg only if those sections exist on master:
 
@@ -576,7 +613,7 @@ __version__ = version("<package-name>")
 - Delete the `requirements/` directory
 - Update `tox.ini` to use `tox-uv>=1` and `uv-venv-lock-runner` with `dependency_groups`
 - Update Makefile targets (`upgrade`, `compile-requirements`, `requirements`)
-- Update CI to install uv via `astral-sh/setup-uv`, install deps via `uv sync --group ci`, and run tests via `uv run tox`
+- Update CI to install uv via `astral-sh/setup-uv`, install deps via `uv sync --locked --group ci`, and run tests via `uv run --locked tox`
 
 #### 2.1 — Add dependency groups to pyproject.toml
 
@@ -855,10 +892,10 @@ jobs:
           python-version: "${{ matrix.python-version }}"
 
       - name: Install CI dependencies
-        run: uv sync --group ci
+        run: uv sync --locked --group ci
 
       - name: Run tox
-        run: uv run tox -e ${{ matrix.toxenv }}
+        run: uv run --locked tox -e ${{ matrix.toxenv }}
 
       - name: Upload coverage to Codecov
         # Compound condition: toxenv name + python-version to pin the exact job.
@@ -902,8 +939,11 @@ jobs:
 ```toml
 [tool.semantic_release]
 build_command = "pip install build && SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION python -m build"
-changelog = false  # repo has its own CHANGELOG file; PSR must not overwrite it
 
+# Do NOT add changelog = false here — that belongs in release.yml as an action
+# input (changelog: "false"). Putting it in pyproject.toml is an anti-pattern:
+# it scatters release policy across two files and can silently drift out of sync.
+#
 # Do NOT add a [tool.semantic_release.changelog] section. We no longer manage a
 # changelog file with PSR. Release notes live only on the GitHub Release page
 # (PSR still creates the GitHub Release by default). See Step 3.4.
@@ -1105,6 +1145,9 @@ git rm -r requirements/ 2>/dev/null || true
 # Delete only if it existed on master:
 git rm .coveragerc 2>/dev/null || true
 
+# Delete if it existed on master — config migrated to [tool.pytest.ini_options] in pyproject.toml:
+git rm pytest.ini 2>/dev/null || true
+
 # NEVER delete CHANGELOG.rst — if it exists, Step 3.4 prepends a deprecation note (it is not wired to PSR).
 
 # NEVER delete — ruff is out of scope:
@@ -1113,7 +1156,7 @@ git rm .coveragerc 2>/dev/null || true
 
 Verify:
 ```bash
-for f in setup.py setup.cfg .coveragerc; do
+for f in setup.py setup.cfg .coveragerc pytest.ini; do
   [ -f "$f" ] && echo "STALE: $f still exists" || echo "OK: $f absent"
 done
 [ -d requirements ] && echo "STALE: requirements/ still exists" || echo "OK: requirements/ absent"
@@ -1350,8 +1393,8 @@ PYEOF
 
 # --- Check 6: stale files absent, pylintrc present ---
 echo "--- Check 6: stale files ---"
-for f in setup.py setup.cfg .coveragerc; do
-  [ -f "$f" ] && echo "FAIL: $f still exists" || echo "OK: $f absent"
+for f in setup.py setup.cfg .coveragerc pytest.ini; do
+  [ -f "$f" ] && echo "FAIL: $f still exists — config should be migrated to pyproject.toml" || echo "OK: $f absent"
 done
 [ -d requirements ] && echo "FAIL: requirements/ still exists" || echo "OK: requirements/ absent"
 for f in pylintrc pylintrc_tweaks; do
@@ -2165,6 +2208,59 @@ else:
     raise SystemExit(1)
 PYEOF
 
+# --- Check 27: README references deleted files or tooling ---
+echo "--- Check 27: README stale installation instructions ---"
+python3 << 'PYEOF'
+import re, glob, subprocess
+
+# Stale patterns: things that were deleted by the modernization
+STALE_PATTERNS = [
+    (r'python\s+setup\.py\s+install', "refers to deleted setup.py — replace with `pip install <package-name>`"),
+    (r'python\s+setup\.py\b',         "refers to deleted setup.py — update installation instructions"),
+    (r'pip\s+install\s+-r\s+requirements/', "refers to deleted requirements/ directory — update with uv or pip install instructions"),
+    (r'pip-compile\b',                 "refers to pip-compile (replaced by uv) — update tooling notes"),
+    (r'\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
+    (r'\bsetup\.cfg\b',                "refers to deleted setup.cfg — update any config references"),
+]
+
+readme_files = []
+for pattern in ['README.rst', 'README.md', 'README.txt', 'readme.rst', 'readme.md']:
+    readme_files += glob.glob(pattern)
+for pattern in ['docs/*.rst', 'docs/**/*.rst']:
+    readme_files += glob.glob(pattern, recursive=True)
+
+if not readme_files:
+    print("SKIP: no README or docs/*.rst files found")
+    raise SystemExit(0)
+
+failures = []
+seen_files = set()
+for path in readme_files:
+    real = path.lower()
+    if real in seen_files:
+        continue
+    seen_files.add(real)
+    try:
+        lines = open(path).readlines()
+    except OSError:
+        continue
+    for i, line in enumerate(lines, 1):
+        matched = set()
+        for regex, reason in STALE_PATTERNS:
+            if re.search(regex, line, re.IGNORECASE):
+                if i not in matched:
+                    failures.append(f"  {path}:{i}: {line.rstrip()!r} — {reason}")
+                    matched.add(i)
+                    break
+
+if failures:
+    print("FAIL: README/docs contain stale references to deleted files or tools:")
+    for f in failures:
+        print(f)
+else:
+    print(f"OK: no stale installation/tooling references found in {readme_files}")
+PYEOF
+
 echo "======= END PRE-PR VALIDATION ======="
 ```
 
@@ -2188,7 +2284,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] Makefile `test`/`lint` targets invoked by tox use plain `python`/tool invocations — **no `uv run --group`** (that re-syncs the venv and overrides the Django/package version tox installed)
 - [ ] Makefile targets do **not** use `uv run <tool>` prefix (e.g. `pytest`, not `uv run pytest`) — exception: `upgrade` keeps its `uv run --with edx-lint` line
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
-- [ ] CI uses `astral-sh/setup-uv`, `uv sync --group ci`, `uv run tox`, named `ci.yml`
+- [ ] CI uses `astral-sh/setup-uv`, `uv sync --locked --group ci`, `uv run --locked tox`, named `ci.yml`
 - [ ] CI does **not** set `fail-fast` (it defaults to `true`); `strategy:` block in parity with master
 - [ ] CI checkout does **not** set `fetch-depth: 0` (unnecessary full-history checkout that only slows CI; reference repos omit it — `release.yml` exempt)
 - [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env; Codecov `if:` uses compound condition (`matrix.toxenv == 'py' && matrix.python-version == '3.12'`)
@@ -2203,7 +2299,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] Coverage thresholds match master (no invented `fail_under`)
 - [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
 - [ ] `__version__` in package `__init__.py` uses `importlib.metadata.version("<pkg>")` — never remove `__version__` entirely
-- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x
+- [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section and NO `changelog = false` (anti-pattern — belongs in release.yml action input only); `changelog: "false"` present as action input in release.yml; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x
 - [ ] **Non-PyPI repos:** static `version = "x.y.z"` in `[project]`; no `setuptools-scm`; `## Important Notes` documents why `src/` layout and `release.yml` were not added
 - [ ] `src/` layout decision documented in `## Important Notes` if not adopted
 
@@ -2399,11 +2495,11 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-10410), in order, Test 10 through Test 410.
+Run **all** tests from the [Test suite](#test-suite--tests-10410), in order, Test 10 through Test 420.
 
 **Test 10 is a hard gate.** If ruff is present, Test 10 fails: **stop running the remaining tests**, report only Test 10's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 10 halts — record them as `⏭️ Skipped (halted at Test 10 — ruff present)`.
 
-Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 80 when the repo is in the hardcoded non-PyPI list, Test 110 always (gated — only runs on explicit user request), Test 180 when the repo is in the hardcoded non-PyPI list, Test 210 always (gated — only runs on explicit user request), Test 220 when the user opted out of the src/ move, Test 230 when master did not use mypy, Test 355 when master had no Makefile, Test 360 when master had no isort config in any config file, Test 400 when master had no `upgrade-python-requirements.yml`, Test 405 when repo uses flat layout, Test 410 when `.readthedocs.yaml` is absent, Test 415 when master had no `requirements/base.txt`). Record the outcome of every single test.
+Otherwise, do not stop at the first failure and do not skip a test without recording why (e.g. `make docs` with no `docs/` directory, Test 80 when the repo is in the hardcoded non-PyPI list, Test 110 always (gated — only runs on explicit user request), Test 180 when the repo is in the hardcoded non-PyPI list, Test 210 always (gated — only runs on explicit user request), Test 220 when the user opted out of the src/ move, Test 230 when master did not use mypy, Test 31 when the repo is in the hardcoded non-PyPI list, Test 355 when master had no Makefile, Test 360 when master had no isort config in any config file, Test 400 when master had no `upgrade-python-requirements.yml`, Test 405 when repo uses flat layout, Test 410 when `.readthedocs.yaml` is absent, Test 415 when master had no `requirements/base.txt`). Record the outcome of every single test.
 
 ### Step 3 — Report
 
@@ -2427,6 +2523,7 @@ Template:
 | Test#10 | Ruff absence gate | ✅ Pass | no ruff present |
 | Test#20 | Make targets | ✅ Pass | all targets exit 0 |
 | Test#30 | Package build and distribution contents | ✅ Pass | |
+| Test#31 | Translation symlink exclusion | ✅ Pass | — OR — ⏭️ Skipped (non-PyPI repo) |
 | Test#40 | Lockfile consistency | ❌ Fail | uv lock --check exits 1 |
 | ... | ... | ... | ... |
 | Test#110 | SHA pinning audit | ⏭️ Skipped (gated — run explicitly to check SHA pinning) | |
@@ -2452,6 +2549,8 @@ Template:
 | Test#405 | Coverage `source` config correct for layout | ✅ Pass | — OR — ⏭️ Skipped (flat layout) |
 | Test#410 | `.readthedocs.yaml` uses uv install method | ✅ Pass | — OR — ⏭️ Skipped (no .readthedocs.yaml) |
 | Test#415 | `uv sync` scope matches original pip-sync scope | ✅ Pass | — OR — ⏭️ Skipped (no requirements/base.txt on master) |
+| Test#420 | Lock file is current | ✅ Pass | — OR — ⚠️ Warn (major bumps, no upgrade workflow) |
+| Test#425 | README stale installation instructions | ✅ Pass | no stale setup.py/requirements/ references |
 
 ## Failure details
 
@@ -2463,7 +2562,7 @@ If Test 10 halts, the table lists Test#10 as `🛑 Halt` and every other row as 
 
 ---
 
-## Test suite — Tests 10–410
+## Test suite — Tests 10–425
 
 All tests must be run as part of a verification report (Test/Verify mode). **Test 10 is a hard gate — if it fails, halt.**
 
@@ -2485,6 +2584,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
+| Documentation | 425 | README/docs contain no stale references to deleted files (setup.py, requirements/) |
 
 ### Test 10 — Ruff absence gate (HALT on failure)
 
@@ -2525,6 +2625,59 @@ A target that was working before the migration and fails now is a regression, no
 ### Test 30 — Package build and distribution contents
 
 Build the package **once** on the PR branch and **once** on master/main, then inspect and compare both tarballs and wheels in a single pass — no repeated builds.
+
+**Step 0 — Pre-build symlink check (PyPI repos only; skip for non-PyPI):**
+
+Run this before attempting any build. A git-tracked `translations/` symlink causes `python -m build --wheel` to fail silently until the first `release.yml` run — the standard CI matrix never exercises this path.
+
+```bash
+python3 << 'PYEOF'
+import subprocess, tomllib
+
+result = subprocess.run(
+    ['git', 'ls-files', '--stage'],
+    capture_output=True, text=True
+)
+symlinks = [
+    line.split('\t', 1)[1]
+    for line in result.stdout.splitlines()
+    if line.startswith('120000') and 'translation' in line.lower()
+]
+if not symlinks:
+    print("OK: no git-tracked translation symlinks found")
+else:
+    print(f"Found translation symlinks: {symlinks}")
+    try:
+        with open('pyproject.toml', 'rb') as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        print("FAIL: pyproject.toml not found"); raise SystemExit(1)
+
+    excl = data.get('tool', {}).get('setuptools', {}).get('exclude-package-data', {})
+    missing = []
+    for path in symlinks:
+        # e.g. src/drag_and_drop_v2/translations → pkg = drag_and_drop_v2
+        parts = path.strip('/').split('/')
+        try:
+            trans_idx = parts.index('translations')
+        except ValueError:
+            continue
+        pkg = parts[trans_idx - 1] if trans_idx > 0 else None
+        if pkg and ('translations' not in excl.get(pkg, []) and
+                    'translations' not in excl.get('*', [])):
+            missing.append(pkg)
+    if missing:
+        print(f"FAIL: git-tracked translation symlink found for {missing} but "
+              f"[tool.setuptools.exclude-package-data] does not exclude 'translations' for "
+              f"{'it' if len(missing)==1 else 'them'}. "
+              f"Add:\n  [tool.setuptools.exclude-package-data]\n"
+              + '\n'.join(f'  {p} = ["translations"]' for p in missing)
+              + "\nWithout this, `python -m build --wheel` fails in release.yml.")
+        raise SystemExit(1)
+    else:
+        print(f"OK: translation symlinks present but correctly excluded via exclude-package-data")
+PYEOF
+```
 
 **Step 1 — Build the PR branch (single authoritative build):**
 
@@ -2685,7 +2838,73 @@ git worktree remove /tmp/bundle-worktree-main --force
 
 **Pass:** PR tarball contains all required files; `setup.py` not in tarball (`setup.cfg` is auto-generated by setuptools and is expected — not a failure); PR wheel contains the full package with static assets, `METADATA` present, no `.pyc` files; no regressions vs main in either tarball or wheel; Step 3b reports OK or SKIP (SKIP for any non-PyPI repo, or a repo with no coverage artifacts).
 
-**Fail:** `setup.py` reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression); Step 3b FAILs (a PyPI repo whose `MANIFEST.in` omits prune rules for generated artifacts).
+**Fail:** `setup.py` reappears in the tarball; source package directory missing or empty; static assets absent from tarball or wheel; any file present in main missing from PR (regression); Step 3b FAILs (a PyPI repo whose `MANIFEST.in` omits prune rules for generated artifacts); Step 0 FAIL (translation symlink present without matching `exclude-package-data`).
+
+### Test 31 — Translation symlink exclusion (fast gate, no build required)
+
+**Skip this test for non-PyPI repos.** Record as `⏭️ Skipped (non-PyPI repo — no wheel published)`.
+
+This is a standalone static check that runs before any build. It catches the same issue as Test 30 Step 0 without requiring `python -m build` to be invoked — useful when the build fails for unrelated reasons and you need to triage.
+
+```bash
+python3 << 'PYEOF'
+import subprocess, tomllib, sys
+
+# Find git-tracked symlinks (mode 120000) that contain 'translations'
+result = subprocess.run(['git', 'ls-files', '--stage'], capture_output=True, text=True)
+symlinks = [
+    line.split('\t', 1)[1].strip()
+    for line in result.stdout.splitlines()
+    if line.startswith('120000') and 'translation' in line.lower()
+]
+
+if not symlinks:
+    print("OK: no git-tracked translation symlinks — exclude-package-data not needed")
+    sys.exit(0)
+
+print(f"Found git-tracked translation symlinks: {symlinks}")
+
+try:
+    with open('pyproject.toml', 'rb') as f:
+        data = tomllib.load(f)
+except FileNotFoundError:
+    print("FAIL: pyproject.toml not found"); sys.exit(1)
+
+excl = data.get('tool', {}).get('setuptools', {}).get('exclude-package-data', {})
+failures = []
+for path in symlinks:
+    parts = path.split('/')
+    try:
+        trans_idx = parts.index('translations')
+    except ValueError:
+        continue
+    pkg = parts[trans_idx - 1] if trans_idx > 0 else None
+    if pkg and ('translations' not in excl.get(pkg, []) and
+                'translations' not in excl.get('*', [])):
+        failures.append(
+            f"  Package '{pkg}': symlink at '{path}' not excluded.\n"
+            f"  Add to pyproject.toml:\n"
+            f"    [tool.setuptools.exclude-package-data]\n"
+            f"    {pkg} = [\"translations\"]"
+        )
+
+if failures:
+    print("FAIL: git-tracked translation symlinks exist without matching exclude-package-data.")
+    print("Root cause: setuptools-scm's file finder lists the symlink and build_py tries to")
+    print("copy it as a regular file — `python -m build --wheel` fails in release.yml with")
+    print("  error: can't copy '<pkg>/translations': doesn't exist or not a regular file")
+    print("Moving assets to conf/locale/**/* in package-data does NOT fix this; exclude-package-data does.")
+    for f in failures:
+        print(f)
+    sys.exit(1)
+else:
+    print(f"OK: translation symlinks present and correctly excluded in exclude-package-data")
+PYEOF
+```
+
+**Pass:** No git-tracked translation symlinks found (test trivially passes); OR symlinks found and `[tool.setuptools.exclude-package-data]` has a `translations` entry for the affected package(s).
+
+**Fail:** A git-tracked `translations/` symlink exists under a package directory but `[tool.setuptools.exclude-package-data]` does not exclude it. This will cause `python -m build --wheel` to fail the first time `release.yml` runs on main after merge — it is invisible in CI because the standard matrix never runs the wheel build.
 
 ### Test 40 — Lockfile consistency
 
@@ -2853,8 +3072,8 @@ dropping it is cleaner than inventing a new package directory just to hold it.
 ### Test 90 — No stale files on disk
 
 ```bash
-for f in setup.py setup.cfg .coveragerc; do
-  [ -f "$f" ] && echo "STALE: $f still exists" || echo "OK: $f absent"
+for f in setup.py setup.cfg .coveragerc pytest.ini; do
+  [ -f "$f" ] && echo "STALE: $f still exists — config should be in pyproject.toml" || echo "OK: $f absent"
 done
 [ -d requirements ] && echo "STALE: requirements/ still exists" || echo "OK: requirements/ absent"
 
@@ -3047,10 +3266,18 @@ elif project.get("requires-python"):
 
 # ── 4. license ───────────────────────────────────────────────────────────────
 master_license = cfg_meta("license")
-if master_license and not project.get("license"):
+pr_license = project.get("license", "")
+
+INVALID_SPDX = {"AGPL-3.0", "GPL-3.0", "GPL-2.0", "LGPL-2.1", "LGPL-3.0"}  # deprecated bare forms
+if master_license and not pr_license:
     add(WARN, f"[project].license missing (master had: {master_license!r})")
-elif project.get("license"):
-    print(f"  ok  license = {project['license']!r}")
+elif pr_license in INVALID_SPDX:
+    add(FAIL, f"[project].license = {pr_license!r} is a deprecated SPDX identifier — "
+              f"use the -only or -or-later suffix (e.g. 'AGPL-3.0-only'). "
+              f"Check master's license= field and classifiers to determine which applies; "
+              f"the LICENSE file appendix text is not a grant and must be ignored.")
+elif pr_license:
+    print(f"  ok  license = {pr_license!r}")
 
 # ── 5. classifiers ───────────────────────────────────────────────────────────
 master_cls_raw = cfg_meta("classifiers")
@@ -3462,16 +3689,24 @@ echo "=== immutable-safe release: PSR must NOT publish the release itself ==="
 grep -nE 'vcs_release:\s*"?false"?' .github/workflows/release.yml \
   || echo "(none — FAIL: PSR step must set vcs_release: \"false\" so the release is created draft-first)"
 
-echo "=== changelog disabled: PSR must NOT write a changelog file ==="
-# Accepted in either location: pyproject.toml [tool.semantic_release] changelog = false
-# OR as an action input changelog: "false" in the workflow.
-# See: https://github.com/openedx/codejail-includes/pull/28#discussion_r4059961238
-pyproject_ok=$(grep -E '^\s*changelog\s*=\s*false' pyproject.toml 2>/dev/null | head -1)
+echo "=== changelog disabled in release.yml (required) ==="
+# changelog: "false" must be set as an action input in release.yml — that is the
+# canonical location. Putting it in pyproject.toml is an anti-pattern (release
+# policy scattered across two files, can drift silently).
 workflow_ok=$(grep -nE 'changelog:\s*"?false"?' .github/workflows/release.yml 2>/dev/null | head -1)
-if [ -n "$pyproject_ok" ] || [ -n "$workflow_ok" ]; then
-  echo "OK: changelog disabled (pyproject.toml: ${pyproject_ok:-not set}, workflow: ${workflow_ok:-not set})"
+if [ -n "$workflow_ok" ]; then
+  echo "OK: changelog disabled in release.yml (${workflow_ok})"
 else
-  echo "FAIL: changelog not disabled — add 'changelog = false' to [tool.semantic_release] in pyproject.toml; without it PSR overwrites the repo's CHANGELOG file on every release"
+  echo "FAIL: changelog not disabled in release.yml — add 'changelog: \"false\"' as an action input to the python-semantic-release step; without it PSR overwrites the repo's CHANGELOG file on every release"
+fi
+
+echo "=== changelog = false must NOT be in pyproject.toml (anti-pattern) ==="
+# release policy belongs in the workflow, not the package config.
+pyproject_bad=$(grep -nE '^\s*changelog\s*=\s*false' pyproject.toml 2>/dev/null | head -1)
+if [ -n "$pyproject_bad" ]; then
+  echo "FAIL: 'changelog = false' found in pyproject.toml (line: ${pyproject_bad}) — remove it; changelog is controlled via 'changelog: \"false\"' in release.yml only"
+else
+  echo "OK: changelog = false absent from pyproject.toml"
 fi
 
 echo "=== immutable-safe release: gh release create attaches assets before publishing ==="
@@ -3491,7 +3726,7 @@ echo "=== workflow filename ==="
 [ -f .github/workflows/release.yml ] && echo "OK: named release.yml" || echo "FAIL: release workflow is not named release.yml"
 ```
 
-**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; the PSR step sets `vcs_release: "false"` and `changelog: "false"` and a `gh release create` step attaches `dist/*` to the release; **no** `python-semantic-release/publish-action` step remains; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; changelog disabled via `changelog = false` in `[tool.semantic_release]` (pyproject.toml) **or** `changelog: "false"` as an action input in the workflow — either location is acceptable. (PyPI trusted publisher / OIDC is already configured on all repos, so it is not a merge blocker to flag.)
+**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; the PSR step sets `vcs_release: "false"` and `changelog: "false"` and a `gh release create` step attaches `dist/*` to the release; **no** `python-semantic-release/publish-action` step remains; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; `changelog: "false"` set as an action input in `release.yml` (the only correct location); `changelog = false` is **absent** from `[tool.semantic_release]` in `pyproject.toml` (putting it there is an anti-pattern — release policy belongs in the workflow). (PyPI trusted publisher / OIDC is already configured on all repos, so it is not a merge blocker to flag.)
 
 **Why the immutable-safe pattern is required:** the openedx org has [immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases) enabled, which freezes a release's assets the moment it is published. The old flow (PSR publishes the release, then `publish-action` uploads assets afterward) now fails with `422 Cannot upload assets to an immutable release`, and the artifact-less release aborts the job so PyPI/npm publish never runs. `gh release create <tag> ... dist/*` creates the release as a draft, uploads the assets, then publishes — the only ordering immutable releases allow. See [openedx/sample-plugin#57](https://github.com/openedx/sample-plugin/pull/57).
 
@@ -3917,17 +4152,31 @@ PYEOF
 
 **Pass:** no `commit_parser_options` block (PSR defaults, the #506 standard for other libraries) → SKIP for non-PyPI. **Fail:** the block copies the `backend-plugin-sample` override (`minor_tags`/`patch_tags` equal to the sample's values) without justification. **Warn:** a different custom override is present — permitted only when the repo genuinely needs it per #506.
 
-### Test 250 — uv run tox in CI (not bare tox)
+### Test 250 — uv run tox in CI (not bare tox) and --locked enforced
 
 ```bash
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
   [ ! -f "$workflow" ] && continue
-  if grep -E '^\s*-\s+run:\s+tox\s' "$workflow" > /dev/null; then
-    echo "FAIL: bare tox in $(basename $workflow) — use 'uv run tox'"
+
+  # Check 1: bare tox (not via uv run)
+  if grep -E '^\s+run:\s+tox\b' "$workflow" > /dev/null; then
+    echo "FAIL: bare tox in $(basename $workflow) — use 'uv run --locked tox'"
+  fi
+
+  # Check 2: uv sync --group ci missing --locked
+  if grep -E 'uv sync\b' "$workflow" | grep -v '\-\-locked' | grep -v 'upgrade' > /dev/null; then
+    echo "FAIL: $(basename $workflow) has 'uv sync' without --locked — CI will silently relock on a stale uv.lock instead of failing"
+  fi
+
+  # Check 3: uv run tox missing --locked
+  if grep -E 'uv run\s+tox\b' "$workflow" | grep -v '\-\-locked' > /dev/null; then
+    echo "FAIL: $(basename $workflow) has 'uv run tox' without --locked — add 'uv run --locked tox'"
   fi
 done
-echo "OK: all tox invocations use uv run"
+echo "OK: all CI tox invocations use 'uv run --locked tox' and uv sync uses --locked"
 ```
+
+**Why `--locked` matters:** without it, `uv sync` and `uv run` silently re-resolve and relock in the ephemeral CI runner when `uv.lock` is out of sync with `pyproject.toml` — CI passes and the drift goes unnoticed. With `--locked`, CI fails fast on a stale lockfile, forcing the developer to commit a fresh `uv lock` before merge. This does **not** affect package upgrades — those happen only via `make upgrade` (`uv lock --upgrade`).
 
 ### Test 260 — Python < 3.12 dropped
 
@@ -4954,9 +5203,56 @@ else:
 PYEOF
 ```
 
+```python
+python3 << 'PYEOF'
+import re, glob, tomllib
+
+# Check that addopts doesn't have --cov <dir> overriding source
+addopts = None
+
+# Check pyproject.toml [tool.pytest.ini_options]
+try:
+    with open("pyproject.toml", "rb") as f:
+        data = tomllib.load(f)
+    addopts = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", "")
+except Exception:
+    pass
+
+# Fallback: check pytest.ini
+if not addopts:
+    for path in ["pytest.ini", "setup.cfg"]:
+        try:
+            content = open(path).read()
+            m = re.search(r'addopts\s*=\s*(.+)', content)
+            if m:
+                addopts = m.group(1).strip()
+                break
+        except OSError:
+            continue
+
+if addopts:
+    m = re.search(r'--cov\s+(\S+)', str(addopts))
+    if m:
+        cov_dir = m.group(1)
+        if not cov_dir.startswith('-'):
+            print(f"FAIL: addopts contains '--cov {cov_dir}' which overrides [tool.coverage.run] source.")
+            print(f"  Fix: change to bare '--cov' so pyproject.toml's source = [\"src\"] takes effect.")
+            print(f"  Reason: '--cov <dir>' measures that directory instead of the package — coverage")
+            print(f"  reports the test files at 99%+ while src/i18n/* goes unmeasured.")
+        else:
+            print("OK: addopts uses bare --cov (no directory override)")
+    else:
+        print("OK: addopts has no --cov argument (or no addopts)")
+else:
+    print("OK: no addopts found")
+PYEOF
+```
+
 **Pass:** `source = ["src"]` is used (preferred), or `source_pkgs` pointing at valid package names, or repo is flat layout → SKIP.
 
-**Fail:** `source = ["<pkg_name>"]` where `<pkg_name>` is a subdirectory of `src/` — that directory doesn't exist at the repo root so coverage silently measures nothing. Fix: `source = ["src"]`.
+**Fail (source):** `source = ["<pkg_name>"]` where `<pkg_name>` is a subdirectory of `src/` — that directory doesn't exist at the repo root so coverage silently measures nothing. Fix: `source = ["src"]`.
+
+**Fail (addopts):** `addopts` contains `--cov <dir>` — overrides `source` and measures the wrong directory. Fix: use bare `--cov`.
 
 ---
 
@@ -5109,3 +5405,145 @@ PYEOF
 **Fail (Part A):** Bare `uv sync` found — installs dev group (~3× runtime count). Fix: `uv sync --no-default-groups` for runtime-only targets.
 
 **Fail (Part B):** Package count diverged >25% — scope likely changed. Investigate whether runtime deps were dropped or dev deps were accidentally included.
+
+---
+
+### Test 420 — Lock file is current (upgrade workflow covers staleness)
+
+**Why this matters:** `uv lock --upgrade` is only run explicitly (via `make upgrade`). If the lock was generated weeks or months ago and an upstream package released a new major version since then, CI passes (it uses `--locked`) but every consumer who installs the package fresh today gets the new breaking version. This test checks whether the repo has a weekly `upgrade-python-requirements.yml` workflow to handle this automatically — if it does, stale bumps are covered and the test passes. If it does not, the test flags major version bumps that need manual attention.
+
+This is exactly how Feanil caught the `path` 16→17 API break in i18n-tools: he ran `uv lock --upgrade-package path`, saw 17.1.1 resolve, and found `AttributeError: 'Path' object has no attribute 'abspath'` in the test suite. The fix was to update the code **and** commit the upgraded lock. Repos with the weekly cron would have caught this automatically on the next run.
+
+```python
+python3 << 'PYEOF'
+import subprocess, re, sys, os, glob
+
+if not os.path.exists('uv.lock'):
+    print("SKIP: no uv.lock found")
+    sys.exit(0)
+
+# Check whether the weekly upgrade workflow is present
+upgrade_workflows = glob.glob('.github/workflows/upgrade-python-requirements.yml')
+has_upgrade_workflow = bool(upgrade_workflows)
+
+# Save current lock
+with open('uv.lock', 'r') as f:
+    original = f.read()
+
+def major(v):
+    try:
+        return int(v.split('.')[0].lstrip('v'))
+    except Exception:
+        return 0
+
+try:
+    result = subprocess.run(
+        ['uv', 'lock', '--upgrade'],
+        capture_output=True, text=True, timeout=180
+    )
+    combined = result.stdout + result.stderr
+    updated = re.findall(r'Updated (\S+) v(\S+) -> v(\S+)', combined)
+
+    if not updated:
+        print("PASS: uv.lock is current — uv lock --upgrade changed nothing")
+        sys.exit(0)
+
+    major_bumps = [(p, o, n) for p, o, n in updated if major(n) > major(o)]
+    minor_bumps  = [(p, o, n) for p, o, n in updated if (p, o, n) not in major_bumps]
+
+    if major_bumps and has_upgrade_workflow:
+        print(f"PASS: {len(major_bumps)} major version bump(s) exist but are covered by upgrade-python-requirements.yml (weekly cron):")
+        for pkg, old, new in major_bumps:
+            print(f"  {pkg}: v{old} -> v{new}  (major — will be caught and committed by weekly upgrade run)")
+    elif major_bumps:
+        print(f"WARN: {len(major_bumps)} MAJOR version bump(s) found and NO upgrade-python-requirements.yml present:")
+        for pkg, old, new in major_bumps:
+            print(f"  {pkg}: v{old} -> v{new}  <- MAJOR, API may have changed")
+        print()
+        print("Action for each major bump:")
+        print("  1. Run: uv lock --upgrade-package <pkg>")
+        print("  2. Run the full test suite — fix any AttributeError / ImportError")
+        print("  3. Commit the upgraded uv.lock so CI validates current versions")
+        print("  OR: add an upper-bound pin in [tool.uv].constraint-dependencies and document why")
+
+    if minor_bumps:
+        print(f"INFO: {len(minor_bumps)} minor/patch update(s) available (covered by weekly upgrade cron):")
+        for pkg, old, new in minor_bumps:
+            print(f"  {pkg}: v{old} -> v{new}")
+
+finally:
+    with open('uv.lock', 'w') as f:
+        f.write(original)
+    print("(uv.lock restored to pre-test state)")
+PYEOF
+```
+
+**Pass:** `uv lock --upgrade` changes nothing (lock is already current), OR bumps exist but `upgrade-python-requirements.yml` is present — the weekly cron will catch and commit them automatically.
+
+**Warn:** Major version bumps exist AND there is no `upgrade-python-requirements.yml`. Manual upgrade + test verification required before merge.
+
+**Skip:** No `uv.lock` present (shouldn't happen in a completed modernize PR).
+
+### Test 425 — README and docs stale installation instructions
+
+**Why this matters:** The modernization deletes `setup.py`, `setup.cfg`, and the `requirements/` directory. Any README or docs file that still tells users to `python setup.py install`, `pip install -r requirements/...`, or references other deleted artifacts will be broken on PyPI (where the README is the long description) and confusing to new contributors. This is exactly the gap that let i18n-tools PR #288 ship `README.rst:11` with `python setup.py install` — a reviewer caught it in code review, not in pre-flight.
+
+```python
+python3 << 'PYEOF'
+import re, glob, subprocess, sys
+
+STALE_PATTERNS = [
+    (r'python\s+setup\.py\s+install', "refers to deleted setup.py — replace with `pip install <package-name>`"),
+    (r'python\s+setup\.py\b',         "refers to deleted setup.py — update installation instructions"),
+    (r'pip\s+install\s+-r\s+requirements/', "refers to deleted requirements/ directory — update with pip install instructions"),
+    (r'pip-compile\b',                 "refers to pip-compile (replaced by uv) — update tooling notes"),
+    (r'\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
+]
+
+readme_files = []
+for pat in ['README.rst', 'README.md', 'README.txt', 'readme.rst', 'readme.md']:
+    readme_files += glob.glob(pat)
+for pat in ['docs/*.rst', 'docs/**/*.rst']:
+    readme_files += glob.glob(pat, recursive=True)
+
+if not readme_files:
+    print("SKIP: no README or docs/*.rst files found")
+    sys.exit(0)
+
+failures = []
+seen_files = set()
+for path in readme_files:
+    # Deduplicate case-insensitive filenames (e.g. README.rst and readme.rst on case-insensitive FS)
+    real = path.lower()
+    if real in seen_files:
+        continue
+    seen_files.add(real)
+    try:
+        lines = open(path).readlines()
+    except OSError:
+        continue
+    for i, line in enumerate(lines, 1):
+        matched = set()
+        for regex, reason in STALE_PATTERNS:
+            if re.search(regex, line, re.IGNORECASE):
+                # Use the first (most specific) match per line to avoid double-reporting
+                if i not in matched:
+                    failures.append(f"  {path}:{i}: {line.rstrip()!r}\n    → {reason}")
+                    matched.add(i)
+                    break
+
+if failures:
+    print("FAIL: README/docs contain stale references to deleted files or tooling:")
+    for f in failures:
+        print(f)
+    sys.exit(1)
+else:
+    print(f"PASS: no stale installation/tooling references found in: {readme_files}")
+PYEOF
+```
+
+**Pass:** No README or docs file references `setup.py`, `pip install -r requirements/`, `pip-compile`, or deleted `requirements/*.txt` files.
+
+**Fail:** One or more stale lines found — update each to match the new tooling (e.g. `pip install <package-name>` instead of `python setup.py install`).
+
+**Skip:** No README or docs files present (unusual — flag it).
