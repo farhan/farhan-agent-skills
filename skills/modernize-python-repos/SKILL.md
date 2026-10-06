@@ -2768,6 +2768,7 @@ Check that the tarball includes **all** of the following (adjust paths to match 
 Flag as a failure if:
 - `setup.py` appears in the tarball — it should be deleted as part of the migration and must not be packaged.
 - `CHANGELOG.rst` (if present) is deprecated and must not be packaged.
+- `uv.lock` appears in the tarball — **must never be packaged**. It is a dev/CI lockfile for project maintainers; pip and uv never read it during an sdist install (they resolve from `Requires-Dist` in `pyproject.toml`). Its presence in an sdist only bloats the tarball and confuses consumers. Fix: add `exclude uv.lock` to `MANIFEST.in`.
 - The source package directory is missing or empty.
 - Static assets that existed before the migration are absent — their absence will break installs.
 
@@ -2823,6 +2824,16 @@ EXPECTED = {
     '.coverage':    r'(exclude|global-exclude)\s+\.coverage',
 }
 missing = [name for name, pat in EXPECTED.items() if not re.search(pat, manifest)]
+
+# uv.lock must never be in the sdist — it is a dev/CI lockfile that pip/uv
+# never reads during sdist installation. Check unconditionally for all PyPI repos.
+import os
+if os.path.exists('uv.lock') and not re.search(r'(exclude|global-exclude)\s+uv\.lock', manifest):
+    print("FAIL: uv.lock is git-tracked but MANIFEST.in does not exclude it — add 'exclude uv.lock'")
+    print("  uv.lock is a dev/CI lockfile; pip never reads it during sdist install and it only bloats the tarball.")
+    raise SystemExit(1)
+else:
+    print("OK: uv.lock excluded from sdist (or not present)")
 
 if not has_coverage:
     print("SKIP: repo does not generate coverage artifacts — no prune rules needed")
