@@ -1,6 +1,5 @@
 ---
 name: modernize-python-repos
-disable-model-invocation: true
 description: >
   Modernize an Open edX Python repo to use uv, pyproject.toml (PEP 621/735), optional src/ layout
   (if publishing to PyPI), and python-semantic-release. Three modes: Implement/Re-implement (create or update
@@ -369,14 +368,14 @@ uv_constraints = [
 
   | Master declares | SPDX identifier to use |
   |---|---|
-  | No `license=` field and no `License ::` classifier | `"AGPL-3.0-only"` — nothing published says "or later"; default to `-only` |
   | `license = AGPL-3.0` or `license = AGPL` or classifier `AGPLv3` / `v3` (no "or later") | `"AGPL-3.0-only"` |
   | classifier `GNU Affero General Public License v3 or later (AGPLv3+)` or `license = AGPL-3.0-or-later` | `"AGPL-3.0-or-later"` |
   | `license = Apache-2.0` or classifier `Apache Software License` | `"Apache-2.0"` |
   | `license = MIT` | `"MIT"` |
   | `license = BSD` or classifier `BSD License` | `"BSD-3-Clause"` (verify which BSD variant) |
+  | No `license=` field and no `License ::` classifier | Read the actual `LICENSE` file in the repo — its title/header line identifies the license (e.g. "Apache License, Version 2.0", "MIT License", "GNU AFFERO GENERAL PUBLIC LICENSE Version 3"). Map that to the correct SPDX identifier using the rows above. If the LICENSE file itself is absent or ambiguous, **ask the user explicitly** before writing any value, and add a `> [!CAUTION]` note in the PR description (see PR description format). |
 
-  **Critical:** `AGPL-3.0` is a deprecated/invalid SPDX identifier — always use `AGPL-3.0-only` or `AGPL-3.0-or-later`. The LICENSE file's "How to Apply These Terms to Your New Programs" appendix always contains "or later than version 3" as boilerplate template text — this is **not** a grant this repo makes. Ignore it; look only at `setup.cfg`/`setup.py`.
+  **Critical:** `AGPL-3.0` is a deprecated/invalid SPDX identifier — always use `AGPL-3.0-only` or `AGPL-3.0-or-later`. When metadata is missing, read the LICENSE file *header/title* to determine the license — do **not** rely on the "How to Apply These Terms to Your New Programs" appendix, which always contains "or later than version 3" as boilerplate template text and is **not** a grant this repo makes.
 - `authors` must **always** be exactly `[{name = "Open edX Project", email = "oscm@openedx.org"}]` — do not copy whatever was in `setup.cfg` or `setup.py`; this is the org-standard value for all repos
 - Verify the README filename on disk (`README.rst` vs `README.md`) and update `[tool.setuptools.dynamic]`; remove `readme` from `dynamic` if you set it as a static `readme =` field above
 - Remove `[project.entry-points]` sections that have no entries on master
@@ -490,6 +489,18 @@ show_missing = true
 # addopts = "--reuse-db"
 # DJANGO_SETTINGS_MODULE = "test_settings"
 ```
+
+**INI → TOML type coercion for multi-value pytest options:** In `tox.ini`/`pytest.ini` (INI format), multi-value options like `norecursedirs`, `filterwarnings`, and `markers` are space- or newline-separated strings. In `[tool.pytest.ini_options]` (TOML), they must be **arrays of strings** — copying the value verbatim produces a single-element array containing one space-joined string, which pytest cannot split and silently ignores.
+
+```toml
+# master tox.ini / pytest.ini (INI — space-separated):
+# norecursedirs = .* docs requirements site-packages
+
+# Correct migration to TOML array:
+norecursedirs = [".*", "docs", "site-packages"]
+```
+
+Additionally, drop any directories that no longer exist after the migration (e.g. `requirements/` is deleted — remove it from `norecursedirs`). The same rule applies to any INI option that accepts multiple values: `filterwarnings`, `markers`, `testpaths`, etc.
 
 **Critical — `addopts` with `--cov <dir>`:** If master's `addopts` contains `--cov <testdir>` (e.g. `--cov tests`), **drop the directory argument** and keep bare `--cov`:
 
@@ -860,8 +871,6 @@ gh api repos/codecov/codecov-action/git/ref/heads/main --jq '.object.sha'
 name: CI
 
 on:
-  push:
-    branches: [main]   # match master's default branch name
   pull_request:
   workflow_call:       # allows release.yml to call this as a reusable workflow
 
@@ -922,6 +931,8 @@ jobs:
 - **Never use `uv pip install` to override Django (or any package) version in CI.** `uv pip install "django~=X.Y.0"` bypasses the lockfile and is an anti-pattern for this modernization work. Django version selection must happen entirely through `uv sync --group djangoXY` or `uv run tox -e djangoXY` — both of which pull the pinned version from `uv.lock`. If you see a step like `uv pip install "django~=${{ matrix.django-version }}.0"` on master, replace it with the correct `uv sync --group ...` approach.
 - **Preserve master's YAML list style — do not collapse a multi-line block list into a flow list.** If master writes a matrix list in block form (`os:\n  - ubuntu-latest`), keep it in block form; do not reformat it to flow form (`os: [ubuntu-latest]`). Block form keeps the diff clean — adding a new version (e.g. a new Python or OS entry) shows up as a single added line rather than editing an existing line, which is easier to read and to extend. This applies to every matrix list (`os`, `python-version`, `toxenv`, `django-version`, etc.). The template blocks in this skill use flow form only for brevity; match whatever style master already uses.
 - **`codecov.yml` — do not create if absent.** Do not introduce a `codecov.yml` file if it does not already exist on master/main — an empty or header-only file adds noise with no value. If the repo already has one, read it (`git show master:codecov.yml`) and copy its settings verbatim; do not add any threshold, target, or key that is not already there (in particular, do not invent `coverage.status.patch.target` or any numeric threshold).
+- **No `push:` trigger in `ci.yml` for PyPI repos.** When `release.yml` calls `ci.yml` via `workflow_call`, a separate `push: branches: [main]` trigger in `ci.yml` fires CI twice on every merge — both concurrent runs race to push to the coverage data branch, causing random failures. For PyPI repos, omit the `push:` trigger from `ci.yml` entirely; `release.yml` covers pushes to main. For **non-PyPI repos** (no `release.yml`), keep the `push:` trigger so coverage uploads still happen on merges.
+- **`id: coverage_comment` on the coverage step.** If using `py-cov-action/python-coverage-comment-action`, the step must have `id: coverage_comment` — without it the coverage artifact is silently dropped and the PR comment is never posted. (Codecov-based repos are unaffected.)
 
 ---
 
@@ -1103,6 +1114,22 @@ jobs:
   commitlint:
     uses: openedx/.github/.github/workflows/commitlint.yml@master
 ```
+
+#### 3.3b — Update PR template
+
+With `python-semantic-release` in place, version bumping is automated from commit message types — the manual "Version bumped" checklist item is now meaningless and misleading. Replace it with a Conventional Commits reminder so contributors know which commit type triggers which release tier.
+
+In `.github/PULL_REQUEST_TEMPLATE.md`, replace the `- [ ] Version bumped` line with:
+
+```markdown
+- [ ] Commit messages (and PR title, if squash merging) use the correct
+      [Conventional Commits](https://www.conventionalcommits.org/) type — they determine the
+      release: `fix:` → patch, `feat:` → minor, `!` / `BREAKING CHANGE:` → major
+```
+
+If `.github/PULL_REQUEST_TEMPLATE.md` does not exist on master, do not create it — only update it if it already exists.
+
+---
 
 #### 3.4 — Deprecate CHANGELOG.rst (do NOT wire it to semantic-release)
 
@@ -2463,6 +2490,10 @@ OR
 ## Important Notes
 Add this section only if there is something critical to flag (e.g. a branch-protection check name that must match, a retained workflow that reviewers should scrutinise). Omit entirely if nothing warrants it.
 
+<!-- LICENSE AMBIGUITY — include only when license was not derivable from setup.cfg/setup.py metadata -->
+> [!CAUTION]
+> The original `setup.cfg`/`setup.py` had no `license=` field or `License ::` classifier. The `license` field in `pyproject.toml` was set to `"<SPDX-identifier>"` based on the `LICENSE` file header. **Please verify this is correct** — if the intended license differs, update `[project].license` before merging.
+
 ## Testing Notes
 This PR has not been manually tested against the repo's own features. Testing relied on CI checks and local agent tooling (`make requirements`, `make lint`, `make test`, `python -m build`). Repo-owner is encouraged to run the repo's feature tests before merging.
 
@@ -2478,7 +2509,7 @@ This PR has not been manually tested against the repo's own features. Testing re
 - The 🤖 footer is always present, separated by `---`.
 - The "Removed Makefile targets" table must list every target dropped from master's Makefile, with a specific reason per row (not "no longer needed"). Targets kept but rewritten are not listed here — use the "Updated Makefile targets" table instead.
 - Omit the "Updated Makefile targets" table entirely if no targets changed.
-- `## Important Notes` is conditional — include it only when there is something genuinely critical. Do not add it just to have a section. When included, each bullet must be unique and not repeat facts already stated elsewhere.
+- `## Important Notes` is conditional — include it only when there is something genuinely critical. Do not add it just to have a section. When included, each bullet must be unique and not repeat facts already stated elsewhere. **License ambiguity** is one such critical case: if the license was derived from the `LICENSE` file because `setup.cfg`/`setup.py` had no license metadata, add the `> [!CAUTION]` block shown in the template inside this section.
 - **No repeated content:** every claim must appear in exactly one section. Before writing any bullet, verify it is not already conveyed elsewhere in the description.
 - **Accuracy over completeness:** every claim in the description must be true of this specific PR. Never write a conditional item (bracketed or conditional section) unless its condition was confirmed true in Mode 2 Step 1. When in doubt, omit rather than guess.
 - **Never mention ruff** as part of this migration — it is out of scope.
@@ -2495,7 +2526,7 @@ If a PR (or branch) isn't specified and the working tree isn't already on the mi
 
 ### Step 2 — Run every test
 
-Run **all** tests from the [Test suite](#test-suite--tests-10410), in order, Test 10 through Test 420.
+Run **all** tests from the [Test suite](#test-suite--tests-10455), in order, Test 10 through Test 455.
 
 **Test 10 is a hard gate.** If ruff is present, Test 10 fails: **stop running the remaining tests**, report only Test 10's failure, and follow its instructions (ask the user to revert the ruff changes, then re-run). Do not report the other tests as passed or failed when Test 10 halts — record them as `⏭️ Skipped (halted at Test 10 — ruff present)`.
 
@@ -2547,10 +2578,17 @@ Template:
 | Test#395 | No unnecessary fetch-depth: 0 in CI checkout | ✅ Pass | CI uses default shallow checkout |
 | Test#400 | `upgrade-python-requirements.yml` not deleted | ✅ Pass | workflow present in PR branch |
 | Test#405 | Coverage `source` config correct for layout | ✅ Pass | — OR — ⏭️ Skipped (flat layout) |
+| Test#407 | pytest multi-value options are TOML arrays, not space-joined strings | ✅ Pass | — OR — ⏭️ Skipped (no [tool.pytest.ini_options]) |
 | Test#410 | `.readthedocs.yaml` uses uv install method | ✅ Pass | — OR — ⏭️ Skipped (no .readthedocs.yaml) |
 | Test#415 | `uv sync` scope matches original pip-sync scope | ✅ Pass | — OR — ⏭️ Skipped (no requirements/base.txt on master) |
 | Test#420 | Lock file is current | ✅ Pass | — OR — ⚠️ Warn (major bumps, no upgrade workflow) |
 | Test#425 | README stale installation instructions | ✅ Pass | no stale setup.py/requirements/ references |
+| Test#430 | No invented `[project.optional-dependencies]` | ✅ Pass | — OR — ⏭️ Skipped (master had extras_require) |
+| Test#435 | No package duplication across extras and dependency groups | ✅ Pass | — OR — ⏭️ Skipped (no optional-dependencies block) |
+| Test#440 | Extras count parity with original `extras_require` | ✅ Pass | — OR — ⏭️ Skipped (master had no extras_require) |
+| Test#445 | No double-run: `ci.yml` no `push:` when `release.yml` uses `workflow_call` | ✅ Pass | — OR — ⏭️ Skipped (no ci.yml) |
+| Test#450 | `uv sync` in CI workflows uses `--locked` | ✅ Pass | — OR — ⏭️ Skipped (no .github/workflows/) |
+| Test#455 | `extract_translations` Makefile target does not use `uv` | ✅ Pass | — OR — ⏭️ Skipped (no extract_translations target) |
 
 ## Failure details
 
@@ -2562,7 +2600,7 @@ If Test 10 halts, the table lists Test#10 as `🛑 Halt` and every other row as 
 
 ---
 
-## Test suite — Tests 10–425
+## Test suite — Tests 10–455
 
 All tests must be run as part of a verification report (Test/Verify mode). **Test 10 is a hard gate — if it fails, halt.**
 
@@ -2579,7 +2617,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Versioning | 240, 245, 246 | Versioning strategy: setuptools-scm (PyPI) or static version (no-PyPI), including 0.x guard; PSR `tag_format` matches existing release tags (245, offline) and a matching baseline tag exists for the latest PyPI release (246, ground-truth) — else manual baseline tag required |
 | Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
 | Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
-| Makefile | 20, 140, 350, 355 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox); no `uv run` prefix in target bodies (except `upgrade`) |
+| Makefile | 20, 140, 350, 355, 455 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox); no `uv run` prefix in target bodies (except `upgrade`); `extract_translations` does not use uv |
 | GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390, 395 | YAML valid; branch protection preserved; CI-first + immutable-safe `gh release create` (`vcs_release: "false"`, no `publish-action`) + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo; no unnecessary `fetch-depth: 0` in CI checkout |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
@@ -3724,9 +3762,29 @@ echo "=== password / PYPI_UPLOAD_TOKEN (must be absent) ==="
 grep -nE "password:|PYPI_UPLOAD_TOKEN" .github/workflows/release.yml || echo "(none — OK)"
 echo "=== workflow filename ==="
 [ -f .github/workflows/release.yml ] && echo "OK: named release.yml" || echo "FAIL: release workflow is not named release.yml"
+
+echo "=== release.yml branch matches repo default branch ==="
+# The template ships with `branches: [master]` and two `if: github.ref_name == 'master'` guards.
+# Repos whose default branch is NOT master (e.g. edx_release, main) will never trigger a release.
+# Always verify the branch name in release.yml against the actual repo default branch.
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "unknown")
+echo "Repo default branch: $DEFAULT_BRANCH"
+RELEASE_PUSH_BRANCH=$(grep -E '^\s+branches:\s*\[' .github/workflows/release.yml | head -1 | tr -d ' []' | cut -d: -f2)
+echo "release.yml push branch: $RELEASE_PUSH_BRANCH"
+if [ "$DEFAULT_BRANCH" = "unknown" ]; then
+  echo "WARN: could not determine repo default branch (gh not available?)"
+elif [ "$RELEASE_PUSH_BRANCH" != "$DEFAULT_BRANCH" ]; then
+  echo "FAIL: release.yml listens on '$RELEASE_PUSH_BRANCH' but the repo default branch is '$DEFAULT_BRANCH'."
+  echo "  PSR and PyPI publish will never run. Fix: replace all occurrences of '$RELEASE_PUSH_BRANCH' with '$DEFAULT_BRANCH' in release.yml."
+  echo "  Also check: 'if: github.ref_name == \"$RELEASE_PUSH_BRANCH\"' guards (typically on the release and publish_to_pypi jobs)."
+else
+  echo "OK: release.yml branch '$RELEASE_PUSH_BRANCH' matches repo default branch."
+fi
 ```
 
-**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; the PSR step sets `vcs_release: "false"` and `changelog: "false"` and a `gh release create` step attaches `dist/*` to the release; **no** `python-semantic-release/publish-action` step remains; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; `changelog: "false"` set as an action input in `release.yml` (the only correct location); `changelog = false` is **absent** from `[tool.semantic_release]` in `pyproject.toml` (putting it there is an anti-pattern — release policy belongs in the workflow). (PyPI trusted publisher / OIDC is already configured on all repos, so it is not a merge blocker to flag.)
+**Pass:** A `run_tests` or `run_ci` job calls the CI workflow via `uses:`; `release` and `publish_to_pypi` declare `needs:`; the PSR step sets `vcs_release: "false"` and `changelog: "false"` and a `gh release create` step attaches `dist/*` to the release; **no** `python-semantic-release/publish-action` step remains; `id-token: write` present in `publish_to_pypi`; **no** `password:` input and **no** `PYPI_UPLOAD_TOKEN`; the workflow is named `release.yml`; `changelog: "false"` set as an action input in `release.yml` (the only correct location); `changelog = false` is **absent** from `[tool.semantic_release]` in `pyproject.toml` (putting it there is an anti-pattern — release policy belongs in the workflow); the branch name in `release.yml` matches the repo's actual default branch (not hardcoded to `master` when the repo uses e.g. `edx_release` or `main`). (PyPI trusted publisher / OIDC is already configured on all repos, so it is not a merge blocker to flag.)
+
+**Non-master default branch:** Repos whose default branch is not `master` (e.g. `edx_release`, `main`) require special attention. The standard template ships with `branches: [master]` and `if: github.ref_name == 'master'` guards — if left unchanged, PSR and PyPI publish will never trigger. Always run `gh repo view --json defaultBranchRef` and update all three occurrences in `release.yml`. Also check `ci.yml` — if it has a `push: branches: [master]` trigger alongside `workflow_call:`, fix the branch there too or drop the `push:` trigger entirely (see Test#445). First seen in [openedx/django-wiki#329](https://github.com/openedx/django-wiki/pull/329) where the default branch is `edx_release`.
 
 **Why the immutable-safe pattern is required:** the openedx org has [immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases) enabled, which freezes a release's assets the moment it is published. The old flow (PSR publishes the release, then `publish-action` uploads assets afterward) now fails with `422 Cannot upload assets to an immutable release`, and the artifact-less release aborts the job so PyPI/npm publish never runs. `gh release create <tag> ... dist/*` creates the release as a draft, uploads the assets, then publishes — the only ordering immutable releases allow. See [openedx/sample-plugin#57](https://github.com/openedx/sample-plugin/pull/57).
 
@@ -5256,6 +5314,82 @@ PYEOF
 
 ---
 
+### Test 407 — pytest multi-value options are TOML arrays, not space-joined strings
+
+**Why this matters:** In `tox.ini`/`pytest.ini` (INI format), multi-value pytest options like `norecursedirs`, `filterwarnings`, and `markers` are space- or newline-separated strings. When migrated to `[tool.pytest.ini_options]` in TOML, they must be **arrays of strings**. Copying the INI value verbatim produces a single-element array with a space-joined string (e.g. `[".* docs requirements site-packages"]`), which pytest treats as one pattern containing literal spaces — silently matching nothing. Additionally, directories deleted during migration (e.g. `requirements/`) must be dropped from `norecursedirs`.
+
+SKIP this test if `[tool.pytest.ini_options]` is not present in `pyproject.toml`.
+
+```python
+python3 << 'PYEOF'
+import os, sys, tomllib
+
+MULTI_VALUE_KEYS = ["norecursedirs", "filterwarnings", "markers", "testpaths", "collect_ignore"]
+
+if not os.path.exists("pyproject.toml"):
+    print("SKIP: no pyproject.toml found")
+    sys.exit(0)
+
+with open("pyproject.toml", "rb") as f:
+    data = tomllib.load(f)
+
+ini_opts = data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+if not ini_opts:
+    print("SKIP: no [tool.pytest.ini_options] section found")
+    sys.exit(0)
+
+failures = []
+
+for key in MULTI_VALUE_KEYS:
+    val = ini_opts.get(key)
+    if val is None:
+        continue
+    if isinstance(val, list):
+        # Correct type — check for space-joined strings inside the list
+        for item in val:
+            if isinstance(item, str) and ' ' in item.strip() and not item.strip().startswith('#'):
+                failures.append(
+                    f"  '{key}': contains space-joined string {item!r} — "
+                    f"should be split into separate list entries"
+                )
+    elif isinstance(val, str):
+        failures.append(
+            f"  '{key}': is a plain string {val!r} — must be a TOML array of strings"
+        )
+
+# Check norecursedirs for directories deleted by the migration (e.g. requirements/)
+# Do NOT flag well-known conventions that don't need to exist locally (site-packages, node_modules, etc.)
+MIGRATION_DELETED = {"requirements", "requirements/"}
+if "norecursedirs" in ini_opts:
+    val = ini_opts["norecursedirs"]
+    entries = val if isinstance(val, list) else [val]
+    for entry in entries:
+        for part in (entry.split() if isinstance(entry, str) else [entry]):
+            part = part.strip('"\' ')
+            if part in MIGRATION_DELETED and not os.path.isdir(part):
+                failures.append(
+                    f"  'norecursedirs': entry {part!r} refers to a directory deleted by the migration — remove it"
+                )
+
+if failures:
+    print("FAIL: [tool.pytest.ini_options] has incorrectly migrated multi-value options:")
+    for line in failures:
+        print(line)
+    print()
+    print("  Fix: split space-separated INI strings into TOML string arrays, e.g.:")
+    print('    norecursedirs = [".*", "docs", "site-packages"]')
+    sys.exit(1)
+else:
+    print("PASS: pytest multi-value options are correctly expressed as TOML arrays")
+PYEOF
+```
+
+**Pass:** All multi-value `[tool.pytest.ini_options]` options are proper TOML arrays, each entry is a single pattern, and `norecursedirs` contains no deleted directories.
+
+**Fail:** A multi-value option is a plain string or a single-element list with spaces inside — split it into a proper TOML array. Also remove any `norecursedirs` entries for directories no longer present in the repo.
+
+---
+
 ### Test 410 — `.readthedocs.yaml` uses uv install method (not pip)
 
 When the repo uses uv (i.e. has `uv.lock`), `.readthedocs.yaml` must install doc dependencies via `method: uv / command: sync / groups: [doc]`. Using `method: pip` with `extra_requirements` requires pip extras (`[project.optional-dependencies]`), which do not exist in a uv-migrated repo that uses PEP 735 dependency groups — RTD will fail to install Sphinx and the docs build will error.
@@ -5294,15 +5428,57 @@ elif re.search(r'method:\s*uv', content):
     if re.search(r'extra_requirements', content):
         print(f"FAIL: {rtd_file} uses 'method: uv' but still has 'extra_requirements' — should use 'groups' instead")
     else:
-        print(f"OK: {rtd_file} uses uv install method with groups")
+        # Cross-check: if RTD uses uv groups, there must be no [project.optional-dependencies] docs block
+        # (RTD doesn't use pip extras in this setup, so publishing a docs extra is misleading and unused)
+        if os.path.exists("pyproject.toml"):
+            import tomllib
+            with open("pyproject.toml", "rb") as f:
+                pdata = tomllib.load(f)
+            opt_deps = pdata.get("project", {}).get("optional-dependencies", {})
+            # Parse RTD group names from both inline ([doc]) and block list (- doc) YAML syntax
+            rtd_group_names = re.findall(r'groups:\s*\[([^\]]+)\]', content)
+            rtd_group_names = [g.strip().strip('"\'') for grp in rtd_group_names for g in grp.split(',')]
+            # Also parse block-list form: lines starting with "- <name>" under a "groups:" key
+            in_groups = False
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped == 'groups:':
+                    in_groups = True
+                elif in_groups:
+                    m = re.match(r'^-\s+(\S+)', stripped)
+                    if m:
+                        rtd_group_names.append(m.group(1).strip('"\''))
+                    elif stripped and not stripped.startswith('#'):
+                        in_groups = False
+            dep_groups = pdata.get("dependency-groups", {})
+            rtd_pkgs = set()
+            for g in rtd_group_names:
+                for entry in dep_groups.get(g, []):
+                    if isinstance(entry, str):
+                        rtd_pkgs.add(entry.lower().split('[')[0].split('>')[0].split('<')[0].split('=')[0].strip())
+            invented = []
+            for extra_name, extra_pkgs in opt_deps.items():
+                extra_canonical = {p.lower().split('[')[0].split('>')[0].split('<')[0].split('=')[0].strip() for p in extra_pkgs}
+                overlap = extra_canonical & rtd_pkgs
+                if overlap:
+                    invented.append(f"  '{extra_name}' extra overlaps with RTD group packages: {sorted(overlap)}")
+            if invented:
+                print(f"FAIL: {rtd_file} uses 'method: uv' with groups, but pyproject.toml also has [project.optional-dependencies] entries whose packages duplicate what RTD installs via dependency groups. These extras are unused by RTD and were likely invented during migration (not ported from extras_require).")
+                for line in invented:
+                    print(line)
+                print("  Fix: remove the overlapping [project.optional-dependencies] block(s) and re-lock.")
+            else:
+                print(f"OK: {rtd_file} uses uv install method with groups")
+        else:
+            print(f"OK: {rtd_file} uses uv install method with groups")
 else:
     print(f"INFO: {rtd_file} install method is neither pip nor uv — manual inspection required")
 PYEOF
 ```
 
-**Pass:** `.readthedocs.yaml` uses `method: uv` with `groups` (or file is absent → SKIP).
+**Pass:** `.readthedocs.yaml` uses `method: uv` with `groups` (or file is absent → SKIP), and no `[project.optional-dependencies]` block duplicates what RTD installs via dependency groups.
 
-**Fail:** `method: pip` is used in a uv-migrated repo — switch to the uv install method.
+**Fail:** `method: pip` is used in a uv-migrated repo — switch to the uv install method. Or: `[project.optional-dependencies]` contains extras that duplicate RTD's dependency-group packages — remove the extras block.
 
 ### Test 415 — `uv sync` scope matches original pip-sync scope
 
@@ -5547,3 +5723,389 @@ PYEOF
 **Fail:** One or more stale lines found — update each to match the new tooling (e.g. `pip install <package-name>` instead of `python setup.py install`).
 
 **Skip:** No README or docs files present (unusual — flag it).
+
+---
+
+### Test 430 — No invented `[project.optional-dependencies]`
+
+**Why this matters:** `[project.optional-dependencies]` extras are published on PyPI and consumed by installers. Creating new extras that were not present in the original `setup.py`/`setup.cfg` `extras_require` introduces a PyPI-visible surface that 2.0.0 never had. The canonical mistake: seeing a `doc.in` / `doc` dependency group and incorrectly adding a matching `[project.optional-dependencies]` docs block — dependency groups (PEP 735) are for local/CI use, not PyPI extras (PEP 508).
+
+SKIP this test if the original `setup.py`/`setup.cfg` had `extras_require` (the extras were ported, not invented).
+
+```python
+python3 << 'PYEOF'
+import ast, os, re, sys, tomllib
+
+# --- Read new optional-dependencies ---
+if not os.path.exists("pyproject.toml"):
+    print("SKIP: no pyproject.toml found")
+    sys.exit(0)
+
+with open("pyproject.toml", "rb") as f:
+    pdata = tomllib.load(f)
+
+new_extras = set(pdata.get("project", {}).get("optional-dependencies", {}).keys())
+
+# --- Read original extras_require from setup.py or setup.cfg ---
+old_extras = set()
+
+if os.path.exists("setup.cfg"):
+    content = open("setup.cfg").read()
+    # [options.extras_require] section
+    if re.search(r'^\[options\.extras_require\]', content, re.MULTILINE):
+        for line in re.findall(r'^\[options\.extras_require\](.*?)(?=^\[|\Z)', content, re.DOTALL | re.MULTILINE):
+            for key in re.findall(r'^(\w[\w\-]*)[\s]*=', line, re.MULTILINE):
+                old_extras.add(key)
+
+if os.path.exists("setup.py"):
+    src = open("setup.py").read()
+    # Look for extras_require = {...} in setup() call
+    m = re.search(r'extras_require\s*=\s*(\{[^}]+\})', src, re.DOTALL)
+    if m:
+        try:
+            er = ast.literal_eval(m.group(1))
+            old_extras.update(er.keys())
+        except Exception:
+            # Can't parse statically — record as "had some extras"
+            old_extras.add("__unparseable__")
+
+if not old_extras and new_extras:
+    print(f"FAIL: pyproject.toml has [project.optional-dependencies] with extras {sorted(new_extras)}, but the original setup.py/setup.cfg had no extras_require.")
+    print("  These extras were invented during migration, not ported from the original.")
+    print("  Fix: remove the [project.optional-dependencies] block entirely and re-lock.")
+    sys.exit(1)
+elif old_extras:
+    print(f"SKIP: original had extras_require {sorted(old_extras)} — extras parity checked by Test 440")
+else:
+    print("PASS: no [project.optional-dependencies] block and original had no extras_require")
+PYEOF
+```
+
+**Pass:** No `[project.optional-dependencies]` in `pyproject.toml`, and original had no `extras_require`.
+
+**Skip:** Original `setup.py`/`setup.cfg` had `extras_require` — extras were ported, not invented (Test 440 checks parity).
+
+**Fail:** `pyproject.toml` has `[project.optional-dependencies]` but original had no `extras_require`. Remove the block and re-lock.
+
+---
+
+### Test 435 — No package duplication across extras and dependency groups
+
+**Why this matters:** `[project.optional-dependencies]` and `[dependency-groups]` are two separate mechanisms. If the same package (e.g. `Sphinx`, `doc8`) appears in both, it is a reliable signal that an extra was accidentally invented by mirroring a dependency group rather than porting from `extras_require`. Even when extras legitimately exist, their packages should not duplicate the dependency groups — the groups are the install source for CI/RTD, and the extras are for downstream consumers installing the package with optional features.
+
+SKIP this test if `pyproject.toml` has no `[project.optional-dependencies]` block.
+
+```python
+python3 << 'PYEOF'
+import sys, tomllib
+
+if not __import__("os").path.exists("pyproject.toml"):
+    print("SKIP: no pyproject.toml found")
+    sys.exit(0)
+
+with open("pyproject.toml", "rb") as f:
+    pdata = tomllib.load(f)
+
+opt_deps = pdata.get("project", {}).get("optional-dependencies", {})
+if not opt_deps:
+    print("SKIP: no [project.optional-dependencies] block")
+    sys.exit(0)
+
+dep_groups = pdata.get("dependency-groups", {})
+
+def canonical(pkg):
+    return pkg.lower().split('[')[0].split('>')[0].split('<')[0].split('=')[0].split('!')[0].strip()
+
+# Collect all packages in all dependency groups (non-include-group entries)
+group_pkgs = set()
+for group_name, entries in dep_groups.items():
+    for entry in entries:
+        if isinstance(entry, str):
+            group_pkgs.add(canonical(entry))
+
+failures = []
+for extra_name, extra_pkgs in opt_deps.items():
+    for pkg in extra_pkgs:
+        c = canonical(pkg)
+        if c in group_pkgs:
+            failures.append(f"  '{pkg}' in [project.optional-dependencies].{extra_name} also appears in [dependency-groups]")
+
+if failures:
+    print("FAIL: packages duplicated across [project.optional-dependencies] and [dependency-groups]:")
+    for line in failures:
+        print(line)
+    print("  Dependency groups are for CI/local/RTD use. Extras are for PyPI consumers.")
+    print("  If the extras were invented (not ported from extras_require), remove them entirely.")
+    print("  If the extras are legitimate, their packages must not mirror the dependency groups.")
+    sys.exit(1)
+else:
+    print(f"PASS: no package duplication between [project.optional-dependencies] and [dependency-groups]")
+PYEOF
+```
+
+**Pass:** No package appears in both `[project.optional-dependencies]` and `[dependency-groups]`.
+
+**Skip:** No `[project.optional-dependencies]` block present.
+
+**Fail:** One or more packages duplicated across both. If the extras were invented, remove them. If legitimate, deduplicate.
+
+---
+
+### Test 440 — Extras count parity with original `extras_require`
+
+**Why this matters:** When a repo legitimately had `extras_require` in `setup.py`/`setup.cfg`, every extra must be ported to `[project.optional-dependencies]` — no extras added, none dropped. An extra added on top of what the original had expands the PyPI surface unintentionally; an extra dropped silently breaks downstream users who installed `package[extra]`.
+
+SKIP this test if the original had no `extras_require` (handled by Test 430).
+
+```python
+python3 << 'PYEOF'
+import ast, os, re, sys, tomllib
+
+# --- Read new optional-dependencies ---
+if not os.path.exists("pyproject.toml"):
+    print("SKIP: no pyproject.toml found")
+    sys.exit(0)
+
+with open("pyproject.toml", "rb") as f:
+    pdata = tomllib.load(f)
+
+new_extras = set(pdata.get("project", {}).get("optional-dependencies", {}).keys())
+
+# --- Read original extras_require ---
+old_extras = set()
+unparseable = False
+
+if os.path.exists("setup.cfg"):
+    content = open("setup.cfg").read()
+    if re.search(r'^\[options\.extras_require\]', content, re.MULTILINE):
+        for block in re.findall(r'^\[options\.extras_require\](.*?)(?=^\[|\Z)', content, re.DOTALL | re.MULTILINE):
+            for key in re.findall(r'^(\w[\w\-]*)[\s]*=', block, re.MULTILINE):
+                old_extras.add(key)
+
+if os.path.exists("setup.py"):
+    src = open("setup.py").read()
+    m = re.search(r'extras_require\s*=\s*(\{[^}]+\})', src, re.DOTALL)
+    if m:
+        try:
+            er = ast.literal_eval(m.group(1))
+            old_extras.update(er.keys())
+        except Exception:
+            unparseable = True
+
+if not old_extras and not unparseable:
+    print("SKIP: original had no extras_require — Test 430 applies instead")
+    sys.exit(0)
+
+if unparseable:
+    print("WARN: could not statically parse extras_require from setup.py — manual inspection required")
+    sys.exit(0)
+
+added = new_extras - old_extras
+dropped = old_extras - new_extras
+if added:
+    print(f"FAIL: [project.optional-dependencies] has extras not in original extras_require: {sorted(added)}")
+    print("  These were invented during migration. Remove them.")
+if dropped:
+    print(f"FAIL: [project.optional-dependencies] is missing extras that were in original extras_require: {sorted(dropped)}")
+    print("  These were dropped during migration. Port them.")
+if added or dropped:
+    sys.exit(1)
+else:
+    print(f"PASS: extras parity — original and new both have: {sorted(old_extras)}")
+PYEOF
+```
+
+**Pass:** `[project.optional-dependencies]` contains exactly the same set of extra names as the original `extras_require`.
+
+**Skip:** Original had no `extras_require` (Test 430 covers that path).
+
+**Fail:** Added extras (invented, remove them) or dropped extras (were ported incorrectly, restore them).
+
+---
+
+### Test 445 — No double-run: `ci.yml` must not have `push:` trigger when `release.yml` uses `workflow_call`
+
+**Why this matters:** When `release.yml` calls `ci.yml` via `workflow_call`, every push to the default branch fires CI twice — once from `release.yml` → `workflow_call`, and once from the bare `push:` trigger in `ci.yml`. Both concurrent runs try to push to the coverage data branch, causing race-condition failures. This bug was introduced in `platform-plugin-aspects` PR #253 and fixed in PR [#257](https://github.com/openedx/platform-plugin-aspects/pull/257) (bmtcril). PyPI repos must not have a `push:` trigger in `ci.yml`; non-PyPI repos (no `release.yml`) should keep it.
+
+**Important:** A dead `push: branches: [master]` trigger (wrong branch name) masks this bug — CI only runs once because the push trigger never fires. Once the branch name is corrected (see Test#180 non-master default branch note), the double-run activates. Always fix Test#180 and Test#445 together when the default branch is not `master`. See [openedx/django-wiki#329](https://github.com/openedx/django-wiki/pull/329).
+
+```python
+python3 << 'PYEOF'
+import os, sys
+
+try:
+    import yaml
+except ImportError:
+    print("SKIP: PyYAML not installed — install with: pip install pyyaml")
+    sys.exit(0)
+
+ci_path = ".github/workflows/ci.yml"
+release_path = ".github/workflows/release.yml"
+
+if not os.path.exists(ci_path):
+    print("SKIP: no ci.yml found")
+    sys.exit(0)
+
+with open(ci_path) as f:
+    ci = yaml.safe_load(f)
+
+with open(release_path) as f:
+    release = yaml.safe_load(f) if os.path.exists(release_path) else None
+
+on_triggers = ci.get("on") or ci.get(True) or {}
+if isinstance(on_triggers, str):
+    on_triggers = {on_triggers: None}
+
+has_push_trigger = "push" in on_triggers
+has_workflow_call = "workflow_call" in on_triggers
+
+# Check if release.yml calls ci.yml via workflow_call
+release_calls_ci = False
+if release:
+    for job in (release.get("jobs") or {}).values():
+        uses = job.get("uses", "")
+        if "ci.yml" in uses:
+            release_calls_ci = True
+            break
+
+if release_calls_ci and has_push_trigger and has_workflow_call:
+    print("FAIL: ci.yml has a `push:` trigger AND is called via workflow_call from release.yml.")
+    print("  This fires CI twice on every push to the default branch, racing to update the coverage data branch.")
+    print("  Fix: remove the `push:` block from ci.yml (release.yml's workflow_call covers it).")
+    sys.exit(1)
+elif not release_calls_ci and not has_push_trigger:
+    print("WARN: release.yml does NOT call ci.yml, but ci.yml also has no push trigger.")
+    print("  Coverage will not run on merges to main/master. Add a push: trigger if this is unintentional.")
+else:
+    if release_calls_ci:
+        print("PASS: release.yml calls ci.yml via workflow_call and ci.yml has no redundant push: trigger.")
+    else:
+        print("PASS: no release.yml (non-PyPI repo) — push: trigger in ci.yml is correct for coverage on merges.")
+PYEOF
+```
+
+**Pass:**
+- PyPI repo: `release.yml` calls `ci.yml` via `workflow_call` AND `ci.yml` has no `push:` trigger.
+- Non-PyPI repo: no `release.yml` present AND `ci.yml` has a `push:` trigger (coverage on merges).
+
+**Fail:** `ci.yml` has both `workflow_call` (called by `release.yml`) and a `push:` trigger — remove the `push:` block.
+
+**Warn:** No `release.yml` and no `push:` trigger — coverage will not run on merges; verify this is intentional.
+
+**Skip:** `ci.yml` not present, or PyYAML not installed.
+
+---
+
+### Test 450 — `uv sync` in CI workflows must use `--locked`
+
+**Why this matters:** Without `--locked`, if `uv.lock` has drifted from `pyproject.toml` (e.g. a dependency was bumped but `uv lock` was not re-run), `uv sync` silently regenerates the lockfile on the runner and CI passes. The committed lockfile is then stale — the next developer gets different packages than what CI tested. `--locked` turns this silent corruption into a hard failure, forcing the lockfile to be committed before anything merges.
+
+**Scope:** Only `.github/workflows/` files. Makefile targets are excluded — local dev targets do not need `--locked`, and the `upgrade` target (`uv lock --upgrade`) intentionally updates the lock. `uv run` commands are also excluded — `--locked` is not a valid flag for `uv run`.
+
+```python
+python3 << 'PYEOF'
+import os, re, sys
+
+workflows_dir = ".github/workflows"
+if not os.path.exists(workflows_dir):
+    print("SKIP: no .github/workflows/ directory found")
+    sys.exit(0)
+
+failures = []
+for fname in sorted(os.listdir(workflows_dir)):
+    if not fname.endswith((".yml", ".yaml")):
+        continue
+    fpath = os.path.join(workflows_dir, fname)
+    for lineno, line in enumerate(open(fpath), 1):
+        # Match `uv sync` lines that lack --locked
+        if re.search(r'\buv sync\b', line) and '--locked' not in line:
+            failures.append((fname, lineno, line.strip()))
+
+if failures:
+    print("FAIL: the following uv sync calls in CI workflows are missing --locked:")
+    for fname, lineno, text in failures:
+        print(f"  {fname}:{lineno}: {text}")
+    print()
+    print("  Fix: add --locked to each uv sync call, e.g.:")
+    print("    uv sync --locked --group dev")
+    sys.exit(1)
+else:
+    print("PASS: all uv sync calls in CI workflows include --locked")
+PYEOF
+```
+
+**Pass:** Every `uv sync` line in every `.github/workflows/*.yml` file includes `--locked`.
+
+**Fail:** One or more `uv sync` calls are missing `--locked` — add the flag to each listed line.
+
+**Skip:** No `.github/workflows/` directory present.
+
+### Test 455 — `extract_translations` Makefile target must not use `uv`
+
+**Why this matters:** The `openedx-translations` workflow clones the target repo and runs `make extract_translations` on a runner that has Python/pip but **no uv installed**. If `extract_translations` or its `translation-requirements` prerequisite calls any `uv` command, the step fails silently (`continue-on-error: true`) and the repo's strings stop updating on Transifex. The fix is `pip install --group translations` (pip 25.1+ supports PEP 735 dependency groups natively).
+
+**Scope:** The `Makefile` `translation-requirements` target and the `extract_translations` target body — any `uv` call in either of these targets fails this test.
+
+```python
+python3 << 'PYEOF'
+import re, sys
+
+try:
+    makefile = open("Makefile").read()
+except FileNotFoundError:
+    print("SKIP: no Makefile found")
+    sys.exit(0)
+
+# Extract the translation-requirements and extract_translations target bodies
+# A target body is all lines after "target:" up to the next non-indented line
+targets_to_check = ["translation-requirements", "extract_translations"]
+lines = makefile.splitlines()
+
+in_target = False
+current_target = None
+target_lines = {}  # target_name -> list of (lineno, line)
+
+for i, line in enumerate(lines, 1):
+    # Check if this line starts one of the targets we care about
+    for t in targets_to_check:
+        if re.match(rf'^{re.escape(t)}[\s:]', line):
+            in_target = True
+            current_target = t
+            target_lines.setdefault(t, [])
+            break
+    else:
+        if in_target:
+            if line.startswith('\t') or line.startswith(' '):
+                target_lines[current_target].append((i, line))
+            else:
+                in_target = False
+                current_target = None
+
+if not target_lines:
+    print("SKIP: no extract_translations or translation-requirements target found in Makefile")
+    sys.exit(0)
+
+failures = []
+for target, body_lines in target_lines.items():
+    for lineno, line in body_lines:
+        if re.search(r'\buv\b', line):
+            failures.append((target, lineno, line.strip()))
+
+if failures:
+    print("FAIL: extract_translations/translation-requirements targets use uv — openedx-translations runner has no uv:")
+    for target, lineno, text in failures:
+        print(f"  Makefile:{lineno} (in {target}): {text}")
+    print()
+    print("  Fix: replace uv sync calls with pip install --group <name> (pip 25.1+)")
+    print("  e.g.: pip install --group translations")
+    sys.exit(1)
+else:
+    print("PASS: extract_translations and translation-requirements targets do not use uv")
+PYEOF
+```
+
+**Pass:** Neither `extract_translations` nor `translation-requirements` target bodies contain any `uv` call.
+
+**Fail:** A `uv` call is found in one of those targets — replace it with `pip install --group <name>` so it works on the openedx-translations runner which has no uv.
+
+**Skip:** No `Makefile` present; or neither target exists in the Makefile.
