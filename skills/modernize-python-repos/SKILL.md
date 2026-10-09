@@ -624,7 +624,7 @@ __version__ = version("<package-name>")
 - Delete the `requirements/` directory
 - Update `tox.ini` to use `tox-uv>=1` and `uv-venv-lock-runner` with `dependency_groups`
 - Update Makefile targets (`upgrade`, `compile-requirements`, `requirements`)
-- Update CI to install uv via `astral-sh/setup-uv`, install deps via `uv sync --locked --group ci`, and run tests via `uv run --locked tox`
+- Update CI to install uv via `astral-sh/setup-uv`, install deps via `uv sync --locked --group ci`, and run tests via `uv run tox` (**never** `uv run --locked` — see Test 250)
 
 #### 2.1 — Add dependency groups to pyproject.toml
 
@@ -801,14 +801,20 @@ Only update the two targets the story changes. Everything else stays exactly as-
 
 ```makefile
 requirements: ## install development environment requirements
-	uv sync --group dev
+	uv sync --locked --group dev
 
 upgrade: ## update python dependencies
 	uv run --with edx-lint edx_lint write_uv_constraints pyproject.toml
 	uv lock --upgrade
 ```
 
-**Do NOT add `uv tool install tox --with tox-uv` to the `requirements` target.** CI uses `uv sync --group ci` + `uv run tox` (the locked, pinned tox from the `ci` dependency group). Installing a separate unpinned global tox via `uv tool install` is redundant and creates a version mismatch footgun — the global tox is outside `uv.lock` and can silently drift.
+**Every `uv sync` in the Makefile uses `--locked`** — same as CI. `make requirements` (and any other install target) then fails fast on a stale `uv.lock` instead of silently re-locking, so local envs always match what CI tests. When a developer edits dependencies in `pyproject.toml`, they run `uv lock` (or `make upgrade`) first.
+
+**Never add `--locked` to the `upgrade` target.** Its whole job is to change the lockfile: `edx_lint write_uv_constraints` rewrites `[tool.uv].constraint-dependencies` in `pyproject.toml`, then `uv lock --upgrade` re-resolves. `uv lock --locked` asserts the lock is *unchanged* and would fail. Keep both `upgrade` lines exactly as shown.
+
+**`--locked` goes on `uv sync` only — never on `uv run`** (Makefile or CI). The `uv sync --locked` step already fails on a stale `uv.lock`; repeating the flag on `uv run` adds nothing. Removed from all five modernize PRs on 2026-10-09 (e.g. edx-proctoring `780dcc06`).
+
+**Do NOT add `uv tool install tox --with tox-uv` to the `requirements` target.** CI uses `uv sync --locked --group ci` + `uv run tox` (the locked, pinned tox from the `ci` dependency group). Installing a separate unpinned global tox via `uv tool install` is redundant and creates a version mismatch footgun — the global tox is outside `uv.lock` and can silently drift.
 
 **Drop** only these targets (they are directly replaced by the story):
 - `compile-requirements` — replaced by `uv lock`
@@ -824,13 +830,13 @@ For each hit, replace the `pip install -r` line using this mapping — **match t
 
 | Old command | Correct replacement |
 |---|---|
-| `pip install -r requirements/base.txt` | `uv sync --no-default-groups` (runtime deps only — bare `uv sync` installs the `dev` group by default, ballooning the install from ~30 to ~90 packages) |
-| `pip install -r requirements/test.txt` | `uv sync --group test` |
-| `pip install -r requirements/quality.txt` | `uv sync --group quality` |
-| `pip install -r requirements/doc.txt` | `uv sync --group doc` |
-| `pip install -r requirements/dev.txt` | `uv sync --group dev` |
+| `pip install -r requirements/base.txt` | `uv sync --locked --no-default-groups` (runtime deps only — bare `uv sync` installs the `dev` group by default, ballooning the install from ~30 to ~90 packages) |
+| `pip install -r requirements/test.txt` | `uv sync --locked --group test` |
+| `pip install -r requirements/quality.txt` | `uv sync --locked --group quality` |
+| `pip install -r requirements/doc.txt` | `uv sync --locked --group doc` |
+| `pip install -r requirements/dev.txt` | `uv sync --locked --group dev` |
 
-**Do NOT map a narrow-scope target (e.g. `base_requirements`) to `uv sync --group dev`.** That installs all dev/test/quality packages where only runtime deps were intended.
+**Do NOT map a narrow-scope target (e.g. `base_requirements`) to `uv sync --locked --group dev`.** That installs all dev/test/quality packages where only runtime deps were intended.
 
 **Keep and do not rename** everything else: `lint`, `test`, `test-with-coverage`, `docs`, and all other targets on master. Their implementations call the linters/pytest directly; tox manages the environment around them.
 
@@ -904,7 +910,7 @@ jobs:
         run: uv sync --locked --group ci
 
       - name: Run tox
-        run: uv run --locked tox -e ${{ matrix.toxenv }}
+        run: uv run tox -e ${{ matrix.toxenv }}
 
       - name: Upload coverage to Codecov
         # Compound condition: toxenv name + python-version to pin the exact job.
@@ -919,7 +925,7 @@ jobs:
 
 **Parity rules:**
 - **Do not add `fail-fast` to the matrix `strategy:` block.** `fail-fast` defaults to `true`, so setting it explicitly (`true` *or* `false`) is a needless deviation. Omit the key entirely and keep the `strategy:` block in parity with master — if master had no `fail-fast`, the modernized workflow must have none either.
-- **Do not add `fetch-depth: 0` to the CI checkout step.** The reference CI workflows (`openedx/sample-plugin`, `openedx/xblocks-extra`) use the default shallow checkout even with the same `setuptools-scm` + `fallback_version` setup. A full-history checkout only slows CI — `setuptools-scm` falls back to `fallback_version` for the throwaway build artifact (nothing asserts a specific `__version__`), and the real release uses `SETUPTOOLS_SCM_PRETEND_VERSION`. Leave `actions/checkout` at its default depth in `ci.yml`. (`release.yml` is exempt — `python-semantic-release` needs full history.)
+- **Do not add `fetch-depth: 0` to the CI checkout step.** The reference CI workflows (`openedx/sample-plugin`, `openedx/xblocks-extra`) use the default shallow checkout even with the same `setuptools-scm` + `fallback_version` setup. A full-history checkout only slows CI — `setuptools-scm` falls back to `fallback_version` for the throwaway build artifact (nothing asserts a specific `__version__`), and the real release uses `SETUPTOOLS_SCM_PRETEND_VERSION`. Leave `actions/checkout` at its default depth in `ci.yml` **and `release.yml`**. The sample-plugin `release.yml` omits it too — `python-semantic-release` converts a shallow clone to a full one itself when it needs history. (Removed from edx-proctoring `935bb8ef` and edx-submissions `ebd0e5e` on 2026-10-09.)
 - SHA-pin ALL actions — no mutable version tags (e.g. `@v4`)
 - **Never downgrade a SHA** — for any action already on master, use its exact SHA or a newer one. Running with an older SHA than master is a regression.
 - **Use `py` for the bare Python test env** (no Django suffix). The `python-version` matrix entry drives the interpreter. With Django matrix: use `django42`, `django52` etc.
@@ -928,7 +934,7 @@ jobs:
 - If master's CI checked branch protection under specific job names, the new `name:` field on the matrix job must match exactly — check with repo owner before changing
 - If master had no Codecov step, do not add one
 - Do not add an `actions/setup-python` step — `astral-sh/setup-uv` handles Python installation via `python-version`
-- **Never use `uv pip install` to override Django (or any package) version in CI.** `uv pip install "django~=X.Y.0"` bypasses the lockfile and is an anti-pattern for this modernization work. Django version selection must happen entirely through `uv sync --group djangoXY` or `uv run tox -e djangoXY` — both of which pull the pinned version from `uv.lock`. If you see a step like `uv pip install "django~=${{ matrix.django-version }}.0"` on master, replace it with the correct `uv sync --group ...` approach.
+- **Never use `uv pip install` to override Django (or any package) version in CI.** `uv pip install "django~=X.Y.0"` bypasses the lockfile and is an anti-pattern for this modernization work. Django version selection must happen entirely through `uv sync --locked --group djangoXY` or `uv run tox -e djangoXY` — both of which pull the pinned version from `uv.lock`. If you see a step like `uv pip install "django~=${{ matrix.django-version }}.0"` on master, replace it with the correct `uv sync --locked --group ...` approach.
 - **Preserve master's YAML list style — do not collapse a multi-line block list into a flow list.** If master writes a matrix list in block form (`os:\n  - ubuntu-latest`), keep it in block form; do not reformat it to flow form (`os: [ubuntu-latest]`). Block form keeps the diff clean — adding a new version (e.g. a new Python or OS entry) shows up as a single added line rather than editing an existing line, which is easier to read and to extend. This applies to every matrix list (`os`, `python-version`, `toxenv`, `django-version`, etc.). The template blocks in this skill use flow form only for brevity; match whatever style master already uses.
 - **`codecov.yml` — do not create if absent.** Do not introduce a `codecov.yml` file if it does not already exist on master/main — an empty or header-only file adds noise with no value. If the repo already has one, read it (`git show master:codecov.yml`) and copy its settings verbatim; do not add any threshold, target, or key that is not already there (in particular, do not invent `coverage.status.patch.target` or any numeric threshold).
 - **No `push:` trigger in `ci.yml` for PyPI repos.** When `release.yml` calls `ci.yml` via `workflow_call`, a separate `push: branches: [main]` trigger in `ci.yml` fires CI twice on every merge — both concurrent runs race to push to the coverage data branch, causing random failures. For PyPI repos, omit the `push:` trigger from `ci.yml` entirely; `release.yml` covers pushes to main. For **non-PyPI repos** (no `release.yml`), keep the `push:` trigger so coverage uploads still happen on merges.
@@ -1117,17 +1123,25 @@ jobs:
 
 #### 3.3b — Update PR template
 
-With `python-semantic-release` in place, version bumping is automated from commit message types — the manual "Version bumped" checklist item is now meaningless and misleading. Replace it with a Conventional Commits reminder so contributors know which commit type triggers which release tier.
+With `python-semantic-release` in place, version bumping, changelog entries and tagging are automated from commit message types — any manual checklist item for them is now meaningless and misleading. Replace them with a Conventional Commits reminder so contributors know which commit type triggers which release tier.
 
-In `.github/PULL_REQUEST_TEMPLATE.md`, replace the `- [ ] Version bumped` line with:
+**Locate the template.** It may live at `.github/PULL_REQUEST_TEMPLATE.md`, `.github/pull_request_template.md`, or `docs/pull_request_template.md` (e.g. edx-proctoring). Check all three on master. If none exists, do not create one — only update an existing template.
+
+**Use exactly this item** — the link must point to Open edX's own guidance (OEP-0051), **not** `conventionalcommits.org`. Feanil changed this himself in [openedx/forum#293](https://github.com/openedx/forum/pull/293) (commit `bd327c55`): *"one change to the checklist URL to point to our specific guidance on conventional commits."*
 
 ```markdown
 - [ ] Commit messages (and PR title, if squash merging) use the correct
-      [Conventional Commits](https://www.conventionalcommits.org/) type — they determine the
+      [Conventional Commits](https://docs.openedx.org/projects/openedx-proposals/en/latest/best-practices/oep-0051-bp-conventional-commits.html#specification) type — they determine the
       release: `fix:` → patch, `feat:` → minor, `!` / `BREAKING CHANGE:` → major
 ```
 
-If `.github/PULL_REQUEST_TEMPLATE.md` does not exist on master, do not create it — only update it if it already exists.
+**Rules:**
+- **Remove** every manual release item: "Version bumped", "Updated the version number in `__init__.py`/`package.json`", "Changelog record added", "Described your changes in `CHANGELOG.rst`", and post-merge "Create a tag matching the new version number".
+- **Place the item in the pre-merge checklist** (where "Version bumped" used to be). Never under a **Post-Merge** heading — PSR releases on merge, so a wrong commit type is already published by the time a post-merge item is checked. If removing the tag item leaves the Post-Merge section empty, delete the whole section.
+- **Use the wording verbatim** — do not write variants like "If this should trigger a release, ensure the commit uses a conventional commit prefix…". The item covers every commit type (correctness, not just release triggers) and must mention the PR title for squash merges.
+- Leave every other checklist item and heading untouched.
+
+First seen in [openedx/edx-proctoring#1340](https://github.com/openedx/edx-proctoring/pull/1340) (commit `6eb6eb19`), where the item had been placed under Post-Merge with no OEP-0051 link.
 
 ---
 
@@ -1866,7 +1880,7 @@ except FileNotFoundError:
 
 if re.search(r'uv\s+tool\s+install\s+tox', content):
     print("FAIL: 'uv tool install tox' found in Makefile — this installs an unpinned global tox outside uv.lock. "
-          "Remove it; CI uses 'uv sync --group ci' + 'uv run tox' (the locked tox from the ci dependency group).")
+          "Remove it; CI uses 'uv sync --locked --group ci' + 'uv run tox' (the locked tox from the ci dependency group).")
 else:
     print("OK: no 'uv tool install tox' in Makefile")
 PYEOF
@@ -1876,7 +1890,7 @@ echo "--- Check 21: no uv pip install in CI workflows ---"
 if grep -rqE 'uv pip install' .github/workflows/ 2>/dev/null; then
   echo "FAIL: 'uv pip install' found in CI workflow(s) — this is an anti-pattern:"
   grep -rnE 'uv pip install' .github/workflows/
-  echo "  Use 'uv sync --group <name>' or 'uv run tox -e <env>' instead — both pull from uv.lock."
+  echo "  Use 'uv sync --locked --group <name>' or 'uv run tox -e <env>' instead — both pull from uv.lock."
 else
   echo "OK: no uv pip install in CI workflows"
 fi
@@ -1886,7 +1900,7 @@ echo "--- Check 20: no stray pip install -r requirements/ in Makefile ---"
 if grep -qE 'pip install.*requirements/' Makefile 2>/dev/null; then
   echo "FAIL: Makefile still references requirements/ files via pip install:"
   grep -nE 'pip install.*requirements/' Makefile
-  echo "  requirements/ is deleted — migrate each target to 'uv sync [--group <name>]' using the correct scope"
+  echo "  requirements/ is deleted — migrate each target to 'uv sync --locked [--group <name>]' using the correct scope"
 else
   echo "OK: no pip install -r requirements/ references in Makefile"
 fi
@@ -1974,9 +1988,9 @@ echo "--- Check 22: no unnecessary fetch-depth: 0 in CI checkout ---"
 python3 << 'PYEOF'
 import re, glob, os
 
-# Only the CI test workflow — release.yml may legitimately need full history for python-semantic-release.
+# CI test workflow and release.yml — sample-plugin omits fetch-depth in both; PSR unshallows itself.
 CI_WORKFLOWS = [p for p in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml')
-                if re.search(r'(ci|python-tests)\.ya?ml$', os.path.basename(p))]
+                if re.search(r'(ci|python-tests|release)\.ya?ml$', os.path.basename(p))]
 
 failures = []
 for wf in CI_WORKFLOWS:
@@ -2306,14 +2320,15 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] `uv.lock` committed
 - [ ] `requirements/` deleted
 - [ ] `tox.ini` uses `tox-uv>=1`, `uv-venv-lock-runner`, tox envs call `make` targets
-- [ ] Makefile `upgrade` → `edx_lint write_uv_constraints` + `uv lock --upgrade`
-- [ ] Makefile `requirements` → `uv sync --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
+- [ ] Makefile `upgrade` → `edx_lint write_uv_constraints` + `uv lock --upgrade` — **no `--locked`** in this target
+- [ ] Every Makefile `uv sync` uses `--locked` (Test 450)
+- [ ] Makefile `requirements` → `uv sync --locked --group dev` only — **no `uv tool install tox`** (that installs an unpinned global tox outside uv.lock)
 - [ ] Makefile `test`/`lint` targets invoked by tox use plain `python`/tool invocations — **no `uv run --group`** (that re-syncs the venv and overrides the Django/package version tox installed)
 - [ ] Makefile targets do **not** use `uv run <tool>` prefix (e.g. `pytest`, not `uv run pytest`) — exception: `upgrade` keeps its `uv run --with edx-lint` line
 - [ ] No Makefile targets dropped (except pip-compile targets) and none renamed; `*.py` glob change documented if removed
-- [ ] CI uses `astral-sh/setup-uv`, `uv sync --locked --group ci`, `uv run --locked tox`, named `ci.yml`
+- [ ] CI uses `astral-sh/setup-uv`, `uv sync --locked --group ci`, `uv run tox` (no `--locked` on `uv run`), named `ci.yml`
 - [ ] CI does **not** set `fail-fast` (it defaults to `true`); `strategy:` block in parity with master
-- [ ] CI checkout does **not** set `fetch-depth: 0` (unnecessary full-history checkout that only slows CI; reference repos omit it — `release.yml` exempt)
+- [ ] No checkout sets `fetch-depth: 0` — neither `ci.yml` nor `release.yml` (reference repos omit it; PSR unshallows on its own)
 - [ ] CI toxenv matrix uses `py` (not `py312`) for the bare Python test env; Codecov `if:` uses compound condition (`matrix.toxenv == 'py' && matrix.python-version == '3.12'`)
 - [ ] Codecov `if:` condition references the exact toxenv name used in the matrix
 - [ ] All actions SHA-pinned; no SHA is older than what master used
@@ -2325,6 +2340,7 @@ echo "======= END PRE-PR VALIDATION ======="
 - [ ] **Step 5a pre-PR validation: zero `FAIL:` lines** (includes Check 9: setup.py/setup.cfg migration parity, Check 11: tox env order, Check 12: no new tox envs, Check 13: Makefile target order, Check 14: Makefile changes in scope, Check 23: requirements coverage — every master `requirements/*.in` package survives in pyproject.toml/uv.lock, filename-agnostic, Check 24: tox-called Makefile targets do not use `uv run --group`, Check 25: no dead `[tool.coverage.run]` block in non-Python-test repos, Check 26: no `uv run` in Makefile targets outside `upgrade`)
 - [ ] Coverage thresholds match master (no invented `fail_under`)
 - [ ] No source-tracing comments in `[dependency-groups]` (no `# From requirements/ci.in` style lines)
+- [ ] PR template (if one exists — `.github/` or `docs/`) has the exact Conventional Commits item from Step 3.3b, linking OEP-0051 `#specification` (not conventionalcommits.org), in the pre-merge checklist; no version-bump/changelog/tag items and no Post-Merge release item remain
 - [ ] `__version__` in package `__init__.py` uses `importlib.metadata.version("<pkg>")` — never remove `__version__` entirely
 - [ ] **PyPI repos:** `release.yml` + `commitlint.yml` added; `[tool.semantic_release]` in pyproject.toml with NO `[tool.semantic_release.changelog]` section and NO `changelog = false` (anti-pattern — belongs in release.yml action input only); `changelog: "false"` present as action input in release.yml; `CHANGELOG.rst` not wired to PSR (deprecation note prepended if it exists, otherwise left absent); zero-version guard only if 0.x
 - [ ] **Non-PyPI repos:** static `version = "x.y.z"` in `[project]`; no `setuptools-scm`; `## Important Notes` documents why `src/` layout and `release.yml` were not added
@@ -2428,7 +2444,7 @@ Use the template in [PR description format](#pr-description-format). Apply these
 - **`[- Drop Python X.Y support]` bullet:** include only if `requires-python` changed vs master.
 - **Deleted files line:** list only entries marked `DELETED:` in Step 1 — not `KEPT:` and not `NOT ON MASTER:`. Include `.coveragerc` only if it existed on master. Never list `CHANGELOG.rst` as deleted — it is never removed (if it exists, a deprecation note is prepended; if absent, it stays absent). Never list `pylintrc`/`pylintrc_tweaks` (they are kept this cycle).
 - **Removed Makefile targets table:** populate from the `=== Targets removed ===` list only. Any target in `=== Targets kept ===` must not appear here, even if its implementation was rewritten. Include a specific reason per row.
-- **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed. For the `requirements` target, the entry must describe `uv sync --group dev` — if the `=== uv tool install tox ===` check in Step 1 flagged a hit, do NOT document it as correct in the table; flag it as a bug to fix before the PR is merged.
+- **Updated Makefile targets table:** include only if targets were updated (not removed). Omit the section entirely if no targets changed. For the `requirements` target, the entry must describe `uv sync --locked --group dev` — if the `=== uv tool install tox ===` check in Step 1 flagged a hit, do NOT document it as correct in the table; flag it as a bug to fix before the PR is merged.
 - **`## Python X.Y dropped` section:** present if and only if `requires-python` changed vs master. Omit otherwise.
 - **Versioning section:** write the `[Static]` paragraph if no `setuptools-scm` in `pyproject.toml`; write the `[Dynamic]` paragraph if `setuptools-scm` is present. Write exactly one, never both.
 - **`## Important Notes` section:** include when there is something critical to flag. Use for: omitted items (`release.yml` not added because no PyPI workflow existed; `src/` layout not adopted because repo doesn't publish to PyPI), unusual constraint pins, branch-protection check names reviewers must verify, or any other non-obvious decision. (PyPI trusted publisher / OIDC is already configured on all repos — do not flag it as a merge blocker.)
@@ -2587,7 +2603,7 @@ Template:
 | Test#435 | No package duplication across extras and dependency groups | ✅ Pass | — OR — ⏭️ Skipped (no optional-dependencies block) |
 | Test#440 | Extras count parity with original `extras_require` | ✅ Pass | — OR — ⏭️ Skipped (master had no extras_require) |
 | Test#445 | No double-run: `ci.yml` no `push:` when `release.yml` uses `workflow_call` | ✅ Pass | — OR — ⏭️ Skipped (no ci.yml) |
-| Test#450 | `uv sync` in CI workflows uses `--locked` | ✅ Pass | — OR — ⏭️ Skipped (no .github/workflows/) |
+| Test#450 | `uv sync` in CI workflows and Makefile (except `upgrade`) uses `--locked` | ✅ Pass | — OR — ⏭️ Skipped (no .github/workflows/ or Makefile) |
 | Test#455 | `extract_translations` Makefile target does not use `uv` | ✅ Pass | — OR — ⏭️ Skipped (no extract_translations target) |
 
 ## Failure details
@@ -2618,7 +2634,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Quality tooling | 230, 280, 360, 370 | Mypy retained (if used); quality group has original linters; isort style unchanged; no source-tracing comments in dependency groups |
 | Tox configuration | 60, 320, 330, 380 | tox.ini parses; all envs resolve; no env renamed; commands invoke make targets; required envs present |
 | Makefile | 20, 140, 350, 355, 455 | Targets exit 0; no target dropped without reason; targets run tools directly (not via tox); no `uv run` prefix in target bodies (except `upgrade`); `extract_translations` does not use uv |
-| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390, 395 | YAML valid; branch protection preserved; CI-first + immutable-safe `gh release create` (`vcs_release: "false"`, no `publish-action`) + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo; no unnecessary `fetch-depth: 0` in CI checkout |
+| GitHub Actions and CI | 100, 150, 180, 250, 290, 300, 305, 390, 395 | YAML valid; branch protection preserved; CI-first + immutable-safe `gh release create` (`vcs_release: "false"`, no `publish-action`) + OIDC in release.yml; `uv run tox`; no action version downgrades vs main; toxenv uses `py` not `py312`; `fail-fast` not set + strategy parity with master; no manual venv PATH echo; no `fetch-depth: 0` in CI or release checkout |
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
@@ -2966,10 +2982,10 @@ Must exit 0. If it fails, run `uv lock` to regenerate and commit the updated loc
 ### Test 50 — Dependency group resolution
 
 ```bash
-uv sync --group dev
-uv sync --group ci
-uv sync --group quality
-uv sync --group test
+uv sync --locked --group dev
+uv sync --locked --group ci
+uv sync --locked --group quality
+uv sync --locked --group test
 ```
 
 A conflict means the lockfile is broken for that environment.
@@ -4221,7 +4237,7 @@ PYEOF
 
 **Pass:** no `commit_parser_options` block (PSR defaults, the #506 standard for other libraries) → SKIP for non-PyPI. **Fail:** the block copies the `backend-plugin-sample` override (`minor_tags`/`patch_tags` equal to the sample's values) without justification. **Warn:** a different custom override is present — permitted only when the repo genuinely needs it per #506.
 
-### Test 250 — uv run tox in CI (not bare tox) and --locked enforced
+### Test 250 — uv run tox in CI (not bare tox), `--locked` on uv sync only
 
 ```bash
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
@@ -4229,23 +4245,26 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
   # Check 1: bare tox (not via uv run)
   if grep -E '^\s+run:\s+tox\b' "$workflow" > /dev/null; then
-    echo "FAIL: bare tox in $(basename $workflow) — use 'uv run --locked tox'"
+    echo "FAIL: bare tox in $(basename $workflow) — use 'uv run tox'"
   fi
 
   # Check 2: uv sync --group ci missing --locked
   if grep -E 'uv sync\b' "$workflow" | grep -v '\-\-locked' | grep -v 'upgrade' > /dev/null; then
     echo "FAIL: $(basename $workflow) has 'uv sync' without --locked — CI will silently relock on a stale uv.lock instead of failing"
   fi
-
-  # Check 3: uv run tox missing --locked
-  if grep -E 'uv run\s+tox\b' "$workflow" | grep -v '\-\-locked' > /dev/null; then
-    echo "FAIL: $(basename $workflow) has 'uv run tox' without --locked — add 'uv run --locked tox'"
-  fi
 done
-echo "OK: all CI tox invocations use 'uv run --locked tox' and uv sync uses --locked"
+
+# Check 3: uv run must NOT carry --locked (CI workflows and Makefile)
+# (capture output: grep exits 2 when any path is missing, even if it matched)
+locked_run=$(grep -nsE 'uv run\b.*--locked' .github/workflows/*.yml .github/workflows/*.yaml Makefile)
+if [ -n "$locked_run" ]; then
+  echo "$locked_run"
+  echo "FAIL: 'uv run --locked' found above — drop --locked from uv run; the uv sync --locked step already guards the lockfile"
+fi
+echo "OK: CI runs tox via 'uv run tox', uv sync uses --locked, uv run never does"
 ```
 
-**Why `--locked` matters:** without it, `uv sync` and `uv run` silently re-resolve and relock in the ephemeral CI runner when `uv.lock` is out of sync with `pyproject.toml` — CI passes and the drift goes unnoticed. With `--locked`, CI fails fast on a stale lockfile, forcing the developer to commit a fresh `uv lock` before merge. This does **not** affect package upgrades — those happen only via `make upgrade` (`uv lock --upgrade`).
+**Why `--locked` on `uv sync` matters:** without it, `uv sync` silently re-resolves and relocks in the ephemeral CI runner when `uv.lock` is out of sync with `pyproject.toml` — CI passes and the drift goes unnoticed. With `--locked`, CI fails fast on a stale lockfile, forcing the developer to commit a fresh `uv lock` before merge. `uv run` comes after that step, so `--locked` on it is redundant — keep it off. This does **not** affect package upgrades — those happen only via `make upgrade` (`uv lock --upgrade`).
 
 ### Test 260 — Python < 3.12 dropped
 
@@ -5126,15 +5145,15 @@ The org reference CI workflows ([openedx/sample-plugin](https://github.com/opene
 - `setuptools-scm` simply falls back to `fallback_version` for the throwaway build artifact produced by the `quality`/`docs` jobs — nothing in the test suite asserts a specific `__version__`, and CI never publishes that artifact.
 - The real release (`release.yml`) sets `SETUPTOOLS_SCM_PRETEND_VERSION=$NEW_VERSION`, so publishing does not depend on checkout depth at all.
 
-So `fetch-depth: 0` in the CI test workflow is an unnecessary deviation from the reference standard and should be removed. **`release.yml` is exempt** — `python-semantic-release` legitimately needs full history/tags — so this test targets only the CI test workflow (`ci.yml` / `python-tests.yml`).
+So `fetch-depth: 0` is an unnecessary deviation from the reference standard and should be removed. This applies to **`release.yml` too** — the sample-plugin `release.yml` omits it, and `python-semantic-release` converts a shallow clone to a full one itself when it needs history/tags. The test covers `ci.yml` / `python-tests.yml` and `release.yml`.
 
 ```bash
 python3 << 'PYEOF'
 import re, glob, os
 
-# Only the CI test workflow — release.yml may legitimately need full history for python-semantic-release.
+# CI test workflow and release.yml — sample-plugin omits fetch-depth in both; PSR unshallows itself.
 CI_WORKFLOWS = [p for p in glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml')
-                if re.search(r'(ci|python-tests)\.ya?ml$', os.path.basename(p))]
+                if re.search(r'(ci|python-tests|release)\.ya?ml$', os.path.basename(p))]
 
 failures = []
 for wf in CI_WORKFLOWS:
@@ -5163,7 +5182,7 @@ PYEOF
 
 **Pass:** The CI test workflow's `actions/checkout` step does not set `fetch-depth: 0` (or no CI workflow exists → SKIP).
 
-**Fail:** `ci.yml` (or `python-tests.yml`) sets `fetch-depth: 0` on its checkout — remove it to match the reference standard and speed up CI.
+**Fail:** `ci.yml`, `python-tests.yml` or `release.yml` sets `fetch-depth: 0` on its checkout — remove it to match the reference standard.
 
 ### Test 400 — `upgrade-python-requirements.yml` not deleted
 
@@ -5496,7 +5515,7 @@ PYEOF
 A bare `uv sync` installs the `dev` dependency group by default (uv's implicit default), pulling in
 tox, twine, pylint, pytest, Sphinx, and the full doc tree — typically 3× more packages than the
 runtime set. A Makefile target that previously used `pip-sync requirements/base.txt` (runtime only)
-must migrate to `uv sync --no-default-groups`, not bare `uv sync`.
+must migrate to `uv sync --locked --no-default-groups`, not bare `uv sync`.
 
 This test has two parts:
 
@@ -5529,8 +5548,8 @@ else:
         print("FAIL Part A: bare 'uv sync' found in Makefile (installs dev group by default):")
         for lineno, text in bare_sync_lines:
             print(f"  Line {lineno}: {text}")
-        print("  Fix: replace with 'uv sync --no-default-groups' for runtime-only targets,")
-        print("  or 'uv sync --group <name>' for a specific group (test/quality/doc/dev).")
+        print("  Fix: replace with 'uv sync --locked --no-default-groups' for runtime-only targets,")
+        print("  or 'uv sync --locked --group <name>' for a specific group (test/quality/doc/dev).")
     else:
         print("OK Part A: no bare 'uv sync' in Makefile")
 
@@ -5589,7 +5608,7 @@ PYEOF
 
 **Pass:** No bare `uv sync` in Makefile AND package count within 25% of old `requirements/base.txt`.
 
-**Fail (Part A):** Bare `uv sync` found — installs dev group (~3× runtime count). Fix: `uv sync --no-default-groups` for runtime-only targets.
+**Fail (Part A):** Bare `uv sync` found — installs dev group (~3× runtime count). Fix: `uv sync --locked --no-default-groups` for runtime-only targets.
 
 **Fail (Part B):** Package count diverged >25% — scope likely changed. Investigate whether runtime deps were dropped or dev deps were accidentally included.
 
@@ -6007,49 +6026,63 @@ PYEOF
 
 ---
 
-### Test 450 — `uv sync` in CI workflows must use `--locked`
+### Test 450 — `uv sync` in CI workflows and Makefile must use `--locked`
 
-**Why this matters:** Without `--locked`, if `uv.lock` has drifted from `pyproject.toml` (e.g. a dependency was bumped but `uv lock` was not re-run), `uv sync` silently regenerates the lockfile on the runner and CI passes. The committed lockfile is then stale — the next developer gets different packages than what CI tested. `--locked` turns this silent corruption into a hard failure, forcing the lockfile to be committed before anything merges.
+**Why this matters:** Without `--locked`, if `uv.lock` has drifted from `pyproject.toml` (e.g. a dependency was bumped but `uv lock` was not re-run), `uv sync` silently regenerates the lockfile and the run passes. The committed lockfile is then stale — the next developer gets different packages than what CI tested. `--locked` turns this silent corruption into a hard failure, forcing the lockfile to be committed before anything merges. The Makefile uses it too so local install targets (`make requirements`, `make requirements-test`, …) behave exactly like CI. First applied in [openedx/edx-proctoring#1340](https://github.com/openedx/edx-proctoring/pull/1340) (commit `e3445135`).
 
-**Scope:** Only `.github/workflows/` files. Makefile targets are excluded — local dev targets do not need `--locked`, and the `upgrade` target (`uv lock --upgrade`) intentionally updates the lock. `uv run` commands are also excluded — `--locked` is not a valid flag for `uv run`.
+**Scope:**
+- Every `uv sync` line in `.github/workflows/*.yml` / `*.yaml`.
+- Every `uv sync` line in the `Makefile`, **except inside the `upgrade` target**. `upgrade` exists to change the lockfile (`edx_lint write_uv_constraints` + `uv lock --upgrade`); `--locked` there would make it fail. It normally has no `uv sync` at all — if one appears there, leave it without `--locked`.
+- `uv run` is not checked here — it must **not** carry `--locked`; Test 250 Check 3 enforces that.
 
 ```python
 python3 << 'PYEOF'
 import os, re, sys
 
 workflows_dir = ".github/workflows"
-if not os.path.exists(workflows_dir):
-    print("SKIP: no .github/workflows/ directory found")
-    sys.exit(0)
+if os.path.exists(workflows_dir):
+    for fname in sorted(os.listdir(workflows_dir)):
+        if not fname.endswith((".yml", ".yaml")):
+            continue
+        fpath = os.path.join(workflows_dir, fname)
+        for lineno, line in enumerate(open(fpath), 1):
+            if re.search(r'\buv sync\b', line) and '--locked' not in line:
+                failures.append((f"{workflows_dir}/{fname}", lineno, line.strip()))
+else:
+    print("SKIP (workflows): no .github/workflows/ directory found")
 
-failures = []
-for fname in sorted(os.listdir(workflows_dir)):
-    if not fname.endswith((".yml", ".yaml")):
-        continue
-    fpath = os.path.join(workflows_dir, fname)
-    for lineno, line in enumerate(open(fpath), 1):
-        # Match `uv sync` lines that lack --locked
+# --- Makefile (upgrade target exempt) ---
+if os.path.exists("Makefile"):
+    target = None
+    for lineno, line in enumerate(open("Makefile"), 1):
+        m = re.match(r'^([A-Za-z0-9_.-]+)\s*:(?!=)', line)
+        if m:
+            target = m.group(1)
+        if target == "upgrade":
+            continue
         if re.search(r'\buv sync\b', line) and '--locked' not in line:
-            failures.append((fname, lineno, line.strip()))
+            failures.append((f"Makefile ({target})", lineno, line.strip()))
+else:
+    print("SKIP (Makefile): no Makefile found")
 
 if failures:
-    print("FAIL: the following uv sync calls in CI workflows are missing --locked:")
-    for fname, lineno, text in failures:
-        print(f"  {fname}:{lineno}: {text}")
+    print("FAIL: the following uv sync calls are missing --locked:")
+    for where, lineno, text in failures:
+        print(f"  {where}:{lineno}: {text}")
     print()
     print("  Fix: add --locked to each uv sync call, e.g.:")
     print("    uv sync --locked --group dev")
     sys.exit(1)
 else:
-    print("PASS: all uv sync calls in CI workflows include --locked")
+    print("PASS: all uv sync calls in CI workflows and Makefile (outside 'upgrade') include --locked")
 PYEOF
 ```
 
-**Pass:** Every `uv sync` line in every `.github/workflows/*.yml` file includes `--locked`.
+**Pass:** Every `uv sync` in `.github/workflows/` and in the Makefile (outside `upgrade`) includes `--locked`.
 
 **Fail:** One or more `uv sync` calls are missing `--locked` — add the flag to each listed line.
 
-**Skip:** No `.github/workflows/` directory present.
+**Skip:** Neither `.github/workflows/` nor a `Makefile` is present.
 
 ### Test 455 — `extract_translations` Makefile target must not use `uv`
 
@@ -6062,6 +6095,9 @@ python3 << 'PYEOF'
 import re, sys
 
 try:
+failures = []
+
+# --- CI workflows ---
     makefile = open("Makefile").read()
 except FileNotFoundError:
     print("SKIP: no Makefile found")
@@ -6084,6 +6120,7 @@ for i, line in enumerate(lines, 1):
             current_target = t
             target_lines.setdefault(t, [])
             break
+    print("  (Do NOT add --locked to the Makefile 'upgrade' target.)")
     else:
         if in_target:
             if line.startswith('\t') or line.startswith(' '):
