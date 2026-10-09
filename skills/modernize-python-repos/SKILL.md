@@ -2260,8 +2260,9 @@ STALE_PATTERNS = [
     (r'python\s+setup\.py\b',         "refers to deleted setup.py — update installation instructions"),
     (r'pip\s+install\s+-r\s+requirements/', "refers to deleted requirements/ directory — update with uv or pip install instructions"),
     (r'pip-compile\b',                 "refers to pip-compile (replaced by uv) — update tooling notes"),
-    (r'\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
+    (r'(?<!edx-platform/)\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
     (r'\bsetup\.cfg\b',                "refers to deleted setup.cfg — update any config references"),
+    (r'\.venv/bin/activate',           "tells devs to activate the venv — prefix commands with `uv run` instead (e.g. `uv run make test`)"),
 ]
 
 readme_files = []
@@ -2638,7 +2639,7 @@ All tests must be run as part of a verification report (Test/Verify mode). **Tes
 | Code review audit | 120, 190 | Logic changes noted; no invented thresholds |
 | PR documentation (gated) | 210 | PR body complete and accurate (explicit request only) |
 | SHA pinning audit (gated) | 110 | Actions SHA-pinned in PR-modified workflows (explicit request only) |
-| Documentation | 425 | README/docs contain no stale references to deleted files (setup.py, requirements/) |
+| Documentation | 425 | README/docs contain no stale references to deleted files (setup.py, requirements/) and no `.venv/bin/activate` step (use `uv run`) |
 
 ### Test 10 — Ruff absence gate (HALT on failure)
 
@@ -4895,7 +4896,7 @@ PYEOF
 
 Feanil's rule (2026-09-28): Makefiles must not force or assume a uv environment. The `uv run` prefix belongs in the caller, not the Makefile. Two complementary checks:
 
-**Part A — Makefile:** Strip `uv run` from every target body except `upgrade`. Locally the developer activates the venv; the Makefile just runs the bare tool.
+**Part A — Makefile:** Strip `uv run` from every target body except `upgrade`. Locally the developer runs `uv run make <target>` (README examples use `uv run`, never venv activation — see Test 425); the Makefile just runs the bare tool.
 
 **Part B — CI workflows:** Any workflow step that calls `make <target>` directly (i.e. not routed through `uv run tox`) must prefix with `uv run make <target>` so the uv-managed environment is active. The standard modernized CI calls `uv run tox -e <env>` (which already activates the env), so Part B only applies to repos whose CI calls `make` directly.
 
@@ -5748,7 +5749,8 @@ STALE_PATTERNS = [
     (r'python\s+setup\.py\b',         "refers to deleted setup.py — update installation instructions"),
     (r'pip\s+install\s+-r\s+requirements/', "refers to deleted requirements/ directory — update with pip install instructions"),
     (r'pip-compile\b',                 "refers to pip-compile (replaced by uv) — update tooling notes"),
-    (r'\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
+    (r'(?<!edx-platform/)\brequirements/\w+\.txt\b',     "refers to deleted requirements/*.txt files — update accordingly"),
+    (r'\.venv/bin/activate',           "tells devs to activate the venv — prefix commands with `uv run` instead (e.g. `uv run make test`)"),
 ]
 
 readme_files = []
@@ -5793,7 +5795,9 @@ else:
 PYEOF
 ```
 
-**Pass:** No README or docs file references `setup.py`, `pip install -r requirements/`, `pip-compile`, or deleted `requirements/*.txt` files.
+**Pass:** No README or docs file references `setup.py`, `pip install -r requirements/`, `pip-compile`, deleted `requirements/*.txt` files, or `source .venv/bin/activate`.
+
+**README dev commands use `uv run`, never venv activation.** Write `uv run make quality`, `uv run make test`, `uv run tox` — do not add a `source .venv/bin/activate` step. Only touch README lines the PR actually needs to change. First applied in [openedx/edx-milestones#117](https://github.com/openedx/edx-milestones/pull/117) (commit `33ef43d`).
 
 **Fail:** One or more stale lines found — update each to match the new tooling (e.g. `pip install <package-name>` instead of `python setup.py install`).
 
