@@ -2892,7 +2892,7 @@ Lines starting with `<` are present in **main** but **missing from PR** — thes
 
 ```python
 python3 << 'PYEOF'
-import glob, subprocess, sys
+import glob, re, subprocess, sys
 
 main_wheels = glob.glob('/tmp/bundle-main/*.whl')
 pr_wheels   = glob.glob('dist/*.whl')
@@ -2906,7 +2906,10 @@ def wheel_files(path):
     for line in r.stdout.splitlines():
         parts = line.split()
         if len(parts) >= 4 and parts[0].isdigit():
-            files.add(parts[3])
+            # Strip the version from <name>-<version>.dist-info/ — the PR branch and
+            # master often build different versions (e.g. 6.0.0 vs 6.1.1), which would
+            # otherwise report every dist-info file as both missing and new.
+            files.add(re.sub(r'^([^/]+?)-[^/-]+\.dist-info/', r'\1-VERSION.dist-info/', parts[3]))
     return files
 
 main_files = wheel_files(main_wheels[0])
